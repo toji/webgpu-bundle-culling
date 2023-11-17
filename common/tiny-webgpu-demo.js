@@ -63,8 +63,11 @@ export class TinyWebGpuDemo {
     }
   `;
 
-  #frameMs = new Array(20);
-  #frameMsIndex = 0;
+  #frameJsMs = new Array(20);
+  #frameJsMsIndex = 0;
+
+  #frameGpuNs = new Array(20);
+  #frameGpuNsIndex = 0;
 
   // Configurable by extending classes
   colorFormat = navigator.gpu?.getPreferredCanvasFormat?.() || 'bgra8unorm';
@@ -74,6 +77,10 @@ export class TinyWebGpuDemo {
   fov = Math.PI * 0.5;
   zNear = 0.01;
   zFar = 128;
+
+  timestampQuerySet;
+  timestampResolveBuffer;
+  timestampReadbackBuffers = [];
 
   constructor() {
     this.canvas = document.querySelector('.webgpu-canvas');
@@ -119,7 +126,11 @@ export class TinyWebGpuDemo {
 
       this.onFrame(this.device, this.context, t);
 
-      this.#frameMs[this.#frameMsIndex++ % this.#frameMs.length] = performance.now() - frameStart;
+      this.#frameJsMs[this.#frameJsMsIndex++ % this.#frameJsMs.length] = performance.now() - frameStart;
+
+      if (this.timestampQuerySet) {
+        this.#readbackTimestampQuery();
+      }
     };
 
     this.#initWebGPU().then(() => {
@@ -159,17 +170,26 @@ export class TinyWebGpuDemo {
     mat4.perspectiveZO(this.#projectionMatrix, this.fov, aspect, this.zNear, this.zFar);
   }
 
-  get frameMs() {
+  get frameJsMs() {
     let avg = 0;
-    for (const value of this.#frameMs) {
+    for (const value of this.#frameJsMs) {
       if (value === undefined) { return 0; } // Don't have enough sampled yet
       avg += value;
     }
-    return avg / this.#frameMs.length;
+    return avg / this.#frameJsMs.length;
+  }
+
+  get frameGpuNs() {
+    let avg = 0;
+    for (const value of this.#frameGpuNs) {
+      if (value === undefined) { return 0; } // Don't have enough sampled yet
+      avg += value;
+    }
+    return avg / this.#frameGpuNs.length;
   }
 
   async #initWebGPU() {
-    const adapter = await navigator.gpu.requestAdapter();``
+    const adapter = await navigator.gpu.requestAdapter();
 
     const requiredFeatures = [];
     const featureList = adapter.features;
@@ -178,6 +198,9 @@ export class TinyWebGpuDemo {
     }
     if (featureList.has('texture-compression-etc2')) {
       requiredFeatures.push('texture-compression-etc2');
+    }
+    if (featureList.has('timestamp-query')) {
+      requiredFeatures.push('timestamp-query');
     }
 
     this.device = await adapter.requestDevice({
@@ -216,12 +239,32 @@ export class TinyWebGpuDemo {
       title: 'Stats',
       expanded: false,
     });
-    this.statsFolder.addBinding(this, 'frameMs', {
+    this.statsFolder.addBinding(this, 'frameJsMs', {
       readonly: true,
       view: 'graph',
       min: 0,
       max: 2
     });
+
+    if (this.device.features.has('timestamp-query')) {
+      this.timestampQuerySet = device.createQuerySet({
+        label: 'Timestamp',
+        type: 'timestamp',
+        count: 2,
+      });
+
+      this.timestampResolveBuffer = device.createBuffer({
+        size: BigUint64Array.BYTES_PER_ELEMENT * 2,
+        usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+      });
+
+      this.statsFolder.addBinding(this, 'frameGpuNs', {
+        readonly: true,
+        view: 'graph',
+        min: 0,
+        max: 10000000
+      });
+    }
 
     await this.onInit(this.device);
   }
@@ -261,6 +304,15 @@ export class TinyWebGpuDemo {
       storeOp: this.sampleCount > 1 ? 'discard' : 'store',
     };
 
+    let timestampWrites;
+    if (this.timestampQuerySet) {
+      timestampWrites = {
+        querySet: this.timestampQuerySet,
+        beginningOfPassWriteIndex: 0,
+        endOfPassWriteIndex: 1
+      }
+    }
+
     this.renderPassDescriptor = {
       colorAttachments: [this.colorAttachment],
       depthStencilAttachment: {
@@ -268,8 +320,44 @@ export class TinyWebGpuDemo {
         depthClearValue: 1.0,
         depthLoadOp: 'clear',
         depthStoreOp: 'discard',
-      }
+      },
+      timestampWrites
     };
+  }
+
+  #getTimestampReadbackBuffer() {
+    
+  }
+
+  async #readbackTimestampQuery() {
+    let readbackBuffer;
+    if (this.timestampReadbackBuffers.length > 0) {
+      readbackBuffer = this.timestampReadbackBuffers.pop();
+    } else {
+      readbackBuffer = this.device.createBuffer({
+        label: 'Timestamp Readback',
+        size: this.timestampResolveBuffer.size,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_SRC,
+      });
+    }
+
+    // TODO: This should be part of the frame's command buffer, ideally
+    const encoder = this.device.createCommandEncoder();
+    encoder.resolveQuerySet(this.timestampQuerySet, 0, 2, this.timestampResolveBuffer, 0);
+    encoder.copyBufferToBuffer(this.timestampResolveBuffer, 0, readbackBuffer, 0, this.timestampResolveBuffer.size);
+    this.device.queue.submit([encoder.finish()]);
+
+    await readbackBuffer.mapAsync(GPUMapMode.READ);
+    const mappedArray = new BigUint64Array(readbackBuffer.getMappedRange());
+
+    const renderPassTime = mappedArray[1] - mappedArray[0];
+    // Discard negative times
+    if (renderPassTime >= 0) {
+      this.#frameGpuNs[this.#frameGpuNsIndex++ % this.#frameGpuNs.length] = renderPassTime;
+    }
+
+    readbackBuffer.unmap();
+    this.timestampReadbackBuffers.push(readbackBuffer);
   }
 
   get defaultRenderPassDescriptor() {
