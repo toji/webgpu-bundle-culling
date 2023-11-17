@@ -12,76 +12,20 @@
   <body>
     <canvas class='webgpu-canvas'></canvas>
     <script type="module">
+      import { vec3, vec4, mat4, quat } from 'https://cdn.jsdelivr.net/npm/gl-matrix@3.4.3/esm/index.js';
       import { TinyWebGpuDemo } from './common/tiny-webgpu-demo.js'
       import { AttribLocation } from './common/geometry.js'
       import { BoxGeometry, SphereGeometry, CylinderGeometry, ConeGeometry } from './common/shapes.js'
 
-      // A WebGPU implementation of the "Pristine Grid" shader described at
-      // https://bgolus.medium.com/the-best-darn-grid-shader-yet-727f9278b9d8
-
-      const GRID_SHADER = `
-        // grid function from Best Darn Grid article
-        fn PristineGrid(uv: vec2f, lineWidth: vec2f) -> f32 {
-            let uvDDXY = vec4f(dpdxFine(uv), dpdyFine(uv));
-            let uvDeriv = vec2f(length(uvDDXY.xz), length(uvDDXY.yw));
-            let invertLine: vec2<bool> = lineWidth > vec2f(0.5);
-            let targetWidth: vec2f = select(lineWidth, 1 - lineWidth, invertLine);
-            let drawWidth: vec2f = clamp(targetWidth, uvDeriv, vec2f(0.5));
-            let lineAA: vec2f = uvDeriv * 1.5;
-            var gridUV: vec2f = abs(fract(uv) * 2.0 - 1.0);
-            gridUV = select(1 - gridUV, gridUV, invertLine);
-            var grid2: vec2f = smoothstep(drawWidth + lineAA, drawWidth - lineAA, gridUV);
-            grid2 *= saturate(targetWidth / drawWidth);
-            grid2 = mix(grid2, targetWidth, saturate(uvDeriv * 2.0 - 1.0));
-            grid2 = select(grid2, 1.0 - grid2, invertLine);
-            return mix(grid2.x, 1.0, grid2.y);
-        }
-
-        struct VertexIn {
-          @location(0) pos: vec4f,
-          @location(1) uv: vec2f,
-        }
-
-        struct VertexOut {
-          @builtin(position) pos: vec4f,
-          @location(0) uv: vec2f,
-        }
-
-        struct Camera {
-          projection: mat4x4f,
-          view: mat4x4f,
-        }
-        @group(0) @binding(0) var<uniform> camera: Camera;
-
-        struct GridArgs {
-          lineColor: vec4f,
-          baseColor: vec4f,
-          lineWidth: vec2f,
-        }
-        @group(1) @binding(0) var<uniform> gridArgs: GridArgs;
-
-        @vertex
-        fn vertexMain(in: VertexIn) -> VertexOut {
-          var out: VertexOut;
-          out.pos = camera.projection * camera.view * in.pos;
-          out.uv = in.uv;
-          return out;
-        }
-
-        @fragment
-        fn fragmentMain(in: VertexOut) -> @location(0) vec4f {
-          let grid = PristineGrid(in.uv, gridArgs.lineWidth);
-
-          // lerp between base and line color
-          return mix(gridArgs.baseColor, gridArgs.lineColor, grid * gridArgs.lineColor.a);
-        }
-      `;
+      const tempMat = mat4.create();
+      const tempQuat = quat.create();
 
       const GEOMETRY_SHADER = (geometry) => {
         const layout = geometry.layout;
 
         return `
           struct VertexIn {
+            @builtin(instance_index) instanceIndex : u32,
             @location(${AttribLocation.position}) pos: vec4f,
             @location(${AttribLocation.normal}) norm: vec3f,
             @location(${AttribLocation.texcoord0}) uv0: vec2f,
@@ -91,6 +35,7 @@
             @builtin(position) pos: vec4f,
             @location(0) norm: vec3f,
             @location(1) uv0: vec2f,
+            @location(2) color: vec4f,
           }
 
           struct Camera {
@@ -99,12 +44,20 @@
           }
           @group(0) @binding(0) var<uniform> camera: Camera;
 
+          struct Instance {
+            model: mat4x4f,
+            color: vec4f,
+          }
+          @group(1) @binding(0) var<storage, read> instances: array<Instance>;
+
           @vertex
           fn vertexMain(in: VertexIn) -> VertexOut {
             var out: VertexOut;
-            out.pos = camera.projection * camera.view * in.pos;
-            out.norm = normalize((camera.view * vec4f(in.norm, 0)).xyz);
+            let model = instances[in.instanceIndex].model;
+            out.pos = camera.projection * camera.view * model * in.pos;
+            out.norm = normalize((camera.view * model * vec4f(in.norm, 0)).xyz);
             out.uv0 = in.uv0;
+            out.color = instances[in.instanceIndex].color;
             return out;
           }
 
@@ -115,7 +68,7 @@
 
           @fragment
           fn fragmentMain(in: VertexOut) -> @location(0) vec4f {
-            let baseColor = vec4f(1, 1, 1, 1);
+            let baseColor = in.color;
             let N = normalize(in.norm);
 
             // An extremely simple directional lighting model, just to give our model some shape.
@@ -128,108 +81,89 @@
         `;
       }
 
+      const MAX_INSTANCE_COUNT = 100000;
+      const INSTANCE_ELEMENT_LENGTH = 20;
+      const INSTANCE_BYTE_LENGTH = Float32Array.BYTES_PER_ELEMENT * INSTANCE_ELEMENT_LENGTH;
+
+      const RenderModes = {
+        naive: 0,
+        instanced: 1,
+        renderBundleNaive: 2,
+        renderBundleInstanced: 3,
+      };
+
       export class GridDemo extends TinyWebGpuDemo {
         vertexBuffer = null;
         indexBuffer = null;
-        uniformBuffer = null;
+        instanceBuffer = null;
         bindGroup = null;
         pipeline = null;
-        geometryPipeline = null;
+        renderBundle = null;
 
-        uniformArray = new ArrayBuffer(16 * Float32Array.BYTES_PER_ELEMENT);
-        lineColor = new Float32Array(this.uniformArray, 0, 4);
-        baseColor = new Float32Array(this.uniformArray, 16, 4);
-        lineWidth = new Float32Array(this.uniformArray, 32, 2);
-
-        gridOptions = {
-          clearColor: { r: 0, g: 0, b: 0.2, a: 1 },
-          lineColor: { r: 1, g: 1, b: 1, a: 1 },
-          baseColor: { r: 0, g: 0, b: 0, a: 1 },
-          lineWidthX: 0.05,
-          lineWidthY: 0.05,
+        options = {
+          animateScene: false,
+          renderMode: 1,
         };
+
+        cubes = {
+          first: 0,
+          count: 0,
+          instances: [],
+        };
+        spheres = {
+          first: 0,
+          count: 0,
+          instances: [],
+        };
+        cylinders = {
+          first: 0,
+          count: 0,
+          instances: [],
+        };
+        cones = {
+          first: 0,
+          count: 0,
+          instances: [],
+        };
+
+        instanceArray = new Float32Array(MAX_INSTANCE_COUNT * INSTANCE_ELEMENT_LENGTH);
 
         onInit(device) {
           this.camera.distance = 3;
 
-          this.cubeGeometry = new BoxGeometry(device, {x: -1});
-          this.sphereGeometry = new SphereGeometry(device, {x: 1});
+          this.cubeGeometry = new BoxGeometry(device, {x: 0});
+          this.sphereGeometry = new SphereGeometry(device, {x: 0});
           this.cylinderGeometry = new CylinderGeometry(device, {x:0});
-          this.coneGeometry = new ConeGeometry(device, {x:2});
+          this.coneGeometry = new ConeGeometry(device, {x:0});
 
-          const geometryModule = device.createShaderModule({
+          const module = device.createShaderModule({
             label: 'Geometry Module',
             code: GEOMETRY_SHADER(this.cubeGeometry),
+          });
+
+          const instanceBindGroupLayout = device.createBindGroupLayout({
+            layout: 'Geometry Bind Group Layout',
+            entries: [{
+              binding: 0,
+              visibility: GPUShaderStage.VERTEX,
+              buffer: { type: 'read-only-storage' }
+            }]
           });
 
           device.createRenderPipelineAsync({
             label: 'Geometry Pipeline',
             layout: device.createPipelineLayout({ bindGroupLayouts: [
-              this.frameBindGroupLayout
+              this.frameBindGroupLayout,
+              instanceBindGroupLayout,
             ]}),
             vertex: {
-              module: geometryModule,
+              module,
               entryPoint: 'vertexMain',
               buffers: this.cubeGeometry.layout.buffers,
             },
             primitive: {
               topology: this.cubeGeometry.layout.topology,
               stripIndexFormat: this.cubeGeometry.layout.stripIndexFormat,
-            },
-            fragment: {
-              module: geometryModule,
-              entryPoint: 'fragmentMain',
-              targets: [{
-                format: this.colorFormat,
-              }],
-            },
-            depthStencil: {
-              format: this.depthFormat,
-              depthWriteEnabled: true,
-              depthCompare: 'less-equal',
-            },
-            multisample: {
-              count: this.sampleCount ?? 1
-            }
-          }).then((pipeline) => {
-            this.geometryPipeline = pipeline;
-          });
-          
-          const bindGroupLayout = device.createBindGroupLayout({
-            label: 'Pristine Grid',
-            entries: [{
-              binding: 0,
-              visibility: GPUShaderStage.FRAGMENT,
-              buffer: {}
-            }]
-          });
-
-          const module = device.createShaderModule({
-            label: 'Pristine Grid',
-            code: GRID_SHADER,
-          });
-
-          device.createRenderPipelineAsync({
-            label: 'Pristine Grid',
-            layout: device.createPipelineLayout({ bindGroupLayouts: [
-              this.frameBindGroupLayout,
-              bindGroupLayout,
-            ]}),
-            vertex: {
-              module,
-              entryPoint: 'vertexMain',
-              buffers: [{
-                arrayStride: 20,
-                attributes: [{
-                  shaderLocation: 0, // pos
-                  offset: 0,
-                  format: 'float32x3'
-                }, {
-                  shaderLocation: 1, // uv
-                  offset: 12,
-                  format: 'float32x2'
-                }],
-              }],
             },
             fragment: {
               module,
@@ -250,110 +184,172 @@
             this.pipeline = pipeline;
           });
 
-          const vertexArray = new Float32Array([
-          // x   y   z     u  v
-            -10, -0.5, -10,   0, 0,
-            10, -0.5, -10,   50, 0,
-            -10, -0.5,  10,   0, 50,
-            10, -0.5,  10,   50, 50,
-          ]);
-
-          this.vertexBuffer = device.createBuffer({
-            size: vertexArray.byteLength,
-            usage: GPUBufferUsage.VERTEX,
-            mappedAtCreation: true,
-          });
-          new Float32Array(this.vertexBuffer.getMappedRange()).set(vertexArray);
-          this.vertexBuffer.unmap();
-
-          const indexArray = new Uint32Array([
-            0, 1, 2,
-            1, 2, 3
-          ]);
-
-          this.indexBuffer = device.createBuffer({
-            size: indexArray.byteLength,
-            usage: GPUBufferUsage.INDEX,
-            mappedAtCreation: true,
-          });
-          new Uint32Array(this.indexBuffer.getMappedRange()).set(indexArray);
-          this.indexBuffer.unmap();
-
-          this.uniformBuffer = device.createBuffer({
-            size: this.uniformArray.byteLength,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          this.instanceBuffer = this.device.createBuffer({
+            label: 'Instance',
+            size: MAX_INSTANCE_COUNT * INSTANCE_BYTE_LENGTH,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
           });
 
-          this.bindGroup = device.createBindGroup({
-            label: 'Pristine Grid',
-            layout: bindGroupLayout,
+          this.instanceBindGroup = this.device.createBindGroup({
+            label: 'Instance',
+            layout: instanceBindGroupLayout,
             entries: [{
               binding: 0,
-              resource: { buffer: this.uniformBuffer }
-            }]
+              resource: { buffer: this.instanceBuffer }
+            }],
           });
 
-          const updateUniforms = () => {
-            this.clearColor = this.gridOptions.clearColor;
-            this.lineColor.set([
-              this.gridOptions.lineColor.r,
-              this.gridOptions.lineColor.g,
-              this.gridOptions.lineColor.b,
-              this.gridOptions.lineColor.a
-            ]);
-            this.baseColor.set([
-              this.gridOptions.baseColor.r,
-              this.gridOptions.baseColor.g,
-              this.gridOptions.baseColor.b,
-              this.gridOptions.baseColor.a
-            ]);
-            this.lineWidth.set([
-              this.gridOptions.lineWidthX,
-              this.gridOptions.lineWidthY,
-            ])
-            device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformArray);
-          }
-          updateUniforms();
+          function createInstanceData() {
+            const scale = Math.random() + 0.5;
+            const axis = vec3.fromValues(
+                Math.random() * 2 - 1,
+                Math.random() * 2 - 1,
+                Math.random() * 2 - 1);
+            vec3.normalize(axis, axis);
 
-          this.pane.addBinding(this.gridOptions, 'clearColor', { color: { type: 'float' } });
-          this.pane.addBinding(this.gridOptions, 'lineColor', { color: { type: 'float' } });
-          this.pane.addBinding(this.gridOptions, 'baseColor', { color: { type: 'float' } });
-          this.pane.addBinding(this.gridOptions, 'lineWidthX', { min: 0, max: 1 });
-          this.pane.addBinding(this.gridOptions, 'lineWidthY', { min: 0, max: 1 });
-          this.pane.on('change', updateUniforms);
+            return {
+              pos: vec3.fromValues(
+                (Math.random() * 2 - 1) * 100,
+                (Math.random() * 2 - 1) * 100,
+                (Math.random() * 2 - 1) * 100),
+              scale: vec3.fromValues(scale, scale, scale),
+              axis: axis,
+              rotationSpeed: Math.random() * 2 - 1,
+              color: vec4.fromValues(
+                Math.random() * 0.66 + 0.33,
+                Math.random() * 0.66 + 0.33,
+                Math.random() * 0.66 + 0.33,
+                1)
+            };
+          }
+
+          // Setup the initial instance data
+          this.cubes.first = 0;
+          this.cubes.count = MAX_INSTANCE_COUNT / 4;
+          this.spheres.first = this.cubes.first + this.cubes.count;
+          this.spheres.count = MAX_INSTANCE_COUNT / 4;
+          this.cylinders.first = this.spheres.first + this.spheres.count;
+          this.cylinders.count = MAX_INSTANCE_COUNT / 4;
+          this.cones.first = this.cylinders.first + this.cylinders.count;
+          this.cones.count = MAX_INSTANCE_COUNT / 4;
+
+          for (let i = 0; i < MAX_INSTANCE_COUNT / 4; ++i) {
+            this.cubes.instances[i] = createInstanceData();
+            this.spheres.instances[i] = createInstanceData();
+            this.cylinders.instances[i] = createInstanceData();
+            this.cones.instances[i] = createInstanceData();
+          }
+
+          this.updateInstanceBuffer(performance.now());
+
+          this.pane.addBlade({
+            label: 'render mode',
+            view: 'list',
+            options: RenderModes,
+            value: this.options.renderMode
+          }).on('change', (ev) => {
+            this.options.renderMode = ev.value;
+            this.renderBundle = null;
+          });
+          this.pane.addBinding(this.options, 'animateScene');
+
           this.pane.addButton({
             title: 'ViewSource',
           }).on('click', () => { window.location = 'https://github.com/toji/webgpu-bundle-culling' });
+        }
+
+        updateShapeInstances(shape, timestamp) {
+          for (let i = 0; i < shape.count; ++i) {
+            const instance = shape.instances[i];
+            quat.setAxisAngle(tempQuat, instance.axis, timestamp * instance.rotationSpeed * 0.001);
+            mat4.fromRotationTranslationScale(tempMat, tempQuat, instance.pos, instance.scale);
+
+            const arrayOffset = (shape.first + i) * INSTANCE_ELEMENT_LENGTH;
+            this.instanceArray.set(tempMat, arrayOffset);
+            this.instanceArray.set(instance.color, arrayOffset + 16);
+          }
+        }
+
+        updateInstanceBuffer(timestamp) {
+          this.updateShapeInstances(this.cubes, timestamp);
+          this.updateShapeInstances(this.spheres, timestamp);
+          this.updateShapeInstances(this.cylinders, timestamp);
+          this.updateShapeInstances(this.cones, timestamp);
+
+          this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceArray);
+        }
+
+        drawScene(renderEncoder, instanced) {
+          renderEncoder.setBindGroup(0, this.frameBindGroup);
+          renderEncoder.setBindGroup(1, this.instanceBindGroup);
+          renderEncoder.setPipeline(this.pipeline);
+
+          if (instanced) {
+            this.cubeGeometry.setBuffers(renderEncoder);
+            this.cubeGeometry.draw(renderEncoder, this.cubes.count, this.cubes.first);
+
+            this.sphereGeometry.setBuffers(renderEncoder);
+            this.sphereGeometry.draw(renderEncoder, this.spheres.count, this.spheres.first);
+
+            this.cylinderGeometry.setBuffers(renderEncoder);
+            this.cylinderGeometry.draw(renderEncoder, this.cylinders.count, this.cylinders.first);
+
+            this.coneGeometry.setBuffers(renderEncoder);
+            this.coneGeometry.draw(renderEncoder, this.cones.count, this.cones.first);
+          } else {
+            // This route makes a separate draw call for every single shape in the scene.
+            // THIS IS NOT A BEST PRACTICE! Only shown here for educational purposes. Use instancing
+            // where you can.
+            const drawShapes = (shape, geometry) => {
+              geometry.setBuffers(renderEncoder);
+              for (let i = shape.first; i < shape.first + shape.count; ++i) {
+                geometry.draw(renderEncoder, 1, i);
+              }
+            }
+
+            drawShapes(this.cubes, this.cubeGeometry);
+            drawShapes(this.spheres, this.sphereGeometry);
+            drawShapes(this.cylinders, this.cylinderGeometry);
+            drawShapes(this.cones, this.coneGeometry);
+          }
+        }
+
+        getRenderBundle() {
+          if (!this.renderBundle) {
+            const encoder = this.device.createRenderBundleEncoder({
+              colorFormats: [ this.colorFormat ],
+              depthStencilFormat: this.depthFormat,
+              sampleCount: this.sampleCount
+            });
+
+            this.drawScene(encoder, this.options.renderMode == RenderModes.renderBundleInstanced);
+
+            this.renderBundle = encoder.finish();
+          }
+          return this.renderBundle;
         }
 
         onFrame(device, context, timestamp) {
           const commandEncoder = device.createCommandEncoder();
           const renderPass = commandEncoder.beginRenderPass(this.defaultRenderPassDescriptor);
 
-          renderPass.setBindGroup(0, this.frameBindGroup);
-
-          if (this.pipeline) {
-            renderPass.setPipeline(this.pipeline);
-            renderPass.setBindGroup(1, this.bindGroup); // Assumes the camera bind group is already set.
-            renderPass.setVertexBuffer(0, this.vertexBuffer);
-            renderPass.setIndexBuffer(this.indexBuffer, 'uint32');
-            renderPass.drawIndexed(6);
+          if (this.options.animateScene) {
+            this.updateInstanceBuffer(timestamp);
           }
 
-          if (this.geometryPipeline) {
-            renderPass.setPipeline(this.geometryPipeline);
-            this.cubeGeometry.setBuffers(renderPass);
-            this.cubeGeometry.draw(renderPass);
-
-            this.sphereGeometry.setBuffers(renderPass);
-            this.sphereGeometry.draw(renderPass);
-
-            //renderPass.setPipeline(this.cylinderPipeline);
-            this.cylinderGeometry.setBuffers(renderPass);
-            this.cylinderGeometry.draw(renderPass);
-
-            this.coneGeometry.setBuffers(renderPass);
-            this.coneGeometry.draw(renderPass);
+          if (this.pipeline) {
+            switch (this.options.renderMode) {
+              case RenderModes.naive:
+                this.drawScene(renderPass, false);
+                break;
+              case RenderModes.instanced:
+                this.drawScene(renderPass, true);
+                break;
+              case RenderModes.renderBundleNaive:
+              case RenderModes.renderBundleInstanced:
+                renderPass.executeBundles([this.getRenderBundle()]);
+                break;
+            }
           }
 
           renderPass.end();

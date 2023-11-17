@@ -243,7 +243,7 @@ export class TinyWebGpuDemo {
       readonly: true,
       view: 'graph',
       min: 0,
-      max: 10
+      max: 32
     });
 
     if (this.device.features.has('timestamp-query')) {
@@ -262,7 +262,7 @@ export class TinyWebGpuDemo {
         readonly: true,
         view: 'graph',
         min: 0,
-        max: 10
+        max: 32
       });
     }
 
