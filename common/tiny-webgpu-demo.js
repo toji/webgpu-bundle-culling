@@ -66,8 +66,8 @@ export class TinyWebGpuDemo {
   #frameJsMs = new Array(20);
   #frameJsMsIndex = 0;
 
-  #frameGpuNs = new Array(20);
-  #frameGpuNsIndex = 0;
+  #frameGpuMs = new Array(20);
+  #frameGpuMsIndex = 0;
 
   // Configurable by extending classes
   colorFormat = navigator.gpu?.getPreferredCanvasFormat?.() || 'bgra8unorm';
@@ -179,13 +179,13 @@ export class TinyWebGpuDemo {
     return avg / this.#frameJsMs.length;
   }
 
-  get frameGpuNs() {
+  get frameGpuMs() {
     let avg = 0;
-    for (const value of this.#frameGpuNs) {
+    for (const value of this.#frameGpuMs) {
       if (value === undefined) { return 0; } // Don't have enough sampled yet
       avg += value;
     }
-    return avg / this.#frameGpuNs.length;
+    return avg / this.#frameGpuMs.length;
   }
 
   async #initWebGPU() {
@@ -243,26 +243,26 @@ export class TinyWebGpuDemo {
       readonly: true,
       view: 'graph',
       min: 0,
-      max: 2
+      max: 10
     });
 
     if (this.device.features.has('timestamp-query')) {
-      this.timestampQuerySet = device.createQuerySet({
+      this.timestampQuerySet = this.device.createQuerySet({
         label: 'Timestamp',
         type: 'timestamp',
         count: 2,
       });
 
-      this.timestampResolveBuffer = device.createBuffer({
+      this.timestampResolveBuffer = this.device.createBuffer({
         size: BigUint64Array.BYTES_PER_ELEMENT * 2,
         usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
       });
 
-      this.statsFolder.addBinding(this, 'frameGpuNs', {
+      this.statsFolder.addBinding(this, 'frameGpuMs', {
         readonly: true,
         view: 'graph',
         min: 0,
-        max: 10000000
+        max: 10
       });
     }
 
@@ -325,10 +325,6 @@ export class TinyWebGpuDemo {
     };
   }
 
-  #getTimestampReadbackBuffer() {
-    
-  }
-
   async #readbackTimestampQuery() {
     let readbackBuffer;
     if (this.timestampReadbackBuffers.length > 0) {
@@ -337,7 +333,7 @@ export class TinyWebGpuDemo {
       readbackBuffer = this.device.createBuffer({
         label: 'Timestamp Readback',
         size: this.timestampResolveBuffer.size,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_SRC,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
       });
     }
 
@@ -350,10 +346,10 @@ export class TinyWebGpuDemo {
     await readbackBuffer.mapAsync(GPUMapMode.READ);
     const mappedArray = new BigUint64Array(readbackBuffer.getMappedRange());
 
-    const renderPassTime = mappedArray[1] - mappedArray[0];
+    const renderPassTime = Number(mappedArray[1] - mappedArray[0]);
     // Discard negative times
     if (renderPassTime >= 0) {
-      this.#frameGpuNs[this.#frameGpuNsIndex++ % this.#frameGpuNs.length] = renderPassTime;
+      this.#frameGpuMs[this.#frameGpuMsIndex++ % this.#frameGpuMs.length] = renderPassTime / 1000000;
     }
 
     readbackBuffer.unmap();
