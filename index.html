@@ -35,7 +35,6 @@
             @builtin(position) pos: vec4f,
             @location(0) norm: vec3f,
             @location(1) uv0: vec2f,
-            @location(2) color: vec4f,
           }
 
           struct Camera {
@@ -44,20 +43,20 @@
           }
           @group(0) @binding(0) var<uniform> camera: Camera;
 
-          struct Instance {
-            model: mat4x4f,
+          @group(1) @binding(0) var<storage, read> instances: array<mat4x4f>;
+
+          struct Material {
             color: vec4f,
           }
-          @group(1) @binding(0) var<storage, read> instances: array<Instance>;
+          @group(2) @binding(0) var<uniform> material: Material;
 
           @vertex
           fn vertexMain(in: VertexIn) -> VertexOut {
             var out: VertexOut;
-            let model = instances[in.instanceIndex].model;
+            let model = instances[in.instanceIndex];
             out.pos = camera.projection * camera.view * model * in.pos;
             out.norm = normalize((camera.view * model * vec4f(in.norm, 0)).xyz);
             out.uv0 = in.uv0;
-            out.color = instances[in.instanceIndex].color;
             return out;
           }
 
@@ -68,7 +67,7 @@
 
           @fragment
           fn fragmentMain(in: VertexOut) -> @location(0) vec4f {
-            let baseColor = in.color;
+            let baseColor = material.color;
             let N = normalize(in.norm);
 
             // An extremely simple directional lighting model, just to give our model some shape.
@@ -81,9 +80,8 @@
         `;
       }
 
-      const MAX_INSTANCE_COUNT = 100000;
-      const INSTANCE_ELEMENT_LENGTH = 20;
-      const INSTANCE_BYTE_LENGTH = Float32Array.BYTES_PER_ELEMENT * INSTANCE_ELEMENT_LENGTH;
+      const INSTANCES_PER_DRAWABLE = 1000;
+      const INSTANCE_ELEMENT_LENGTH = 16;
 
       const RenderModes = {
         naive: 0,
@@ -96,7 +94,10 @@
         vertexBuffer = null;
         indexBuffer = null;
         instanceBuffer = null;
-        bindGroup = null;
+        instanceArray = null;
+        geometries = [];
+        materials = [];
+        drawables = [];
         pipeline = null;
         renderBundle = null;
 
@@ -105,44 +106,20 @@
           renderMode: 1,
         };
 
-        cubes = {
-          first: 0,
-          count: 0,
-          instances: [],
-        };
-        spheres = {
-          first: 0,
-          count: 0,
-          instances: [],
-        };
-        cylinders = {
-          first: 0,
-          count: 0,
-          instances: [],
-        };
-        cones = {
-          first: 0,
-          count: 0,
-          instances: [],
-        };
-
-        instanceArray = new Float32Array(MAX_INSTANCE_COUNT * INSTANCE_ELEMENT_LENGTH);
-
         onInit(device) {
           this.camera.distance = 3;
 
-          this.cubeGeometry = new BoxGeometry(device, {x: 0});
-          this.sphereGeometry = new SphereGeometry(device, {x: 0});
-          this.cylinderGeometry = new CylinderGeometry(device, {x:0});
-          this.coneGeometry = new ConeGeometry(device, {x:0});
-
-          const module = device.createShaderModule({
-            label: 'Geometry Module',
-            code: GEOMETRY_SHADER(this.cubeGeometry),
+          this.materialBindGroupLayout = this.device.createBindGroupLayout({
+            layout: 'Material',
+            entries: [{
+              binding: 0,
+              visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+              buffer: {}
+            }]
           });
 
-          const instanceBindGroupLayout = device.createBindGroupLayout({
-            layout: 'Geometry Bind Group Layout',
+          const instanceBindGroupLayout = this.device.createBindGroupLayout({
+            layout: 'Instance',
             entries: [{
               binding: 0,
               visibility: GPUShaderStage.VERTEX,
@@ -150,20 +127,50 @@
             }]
           });
 
+          // 12 different simple materials
+          this.materials.push(this.createMaterialBindGroup(1, 1, 1));
+          this.materials.push(this.createMaterialBindGroup(1, 0, 0));
+          this.materials.push(this.createMaterialBindGroup(0, 1, 0));
+          this.materials.push(this.createMaterialBindGroup(0, 0, 1));
+          this.materials.push(this.createMaterialBindGroup(1, 1, 0));
+          this.materials.push(this.createMaterialBindGroup(1, 0, 1));
+          this.materials.push(this.createMaterialBindGroup(0, 1, 1));
+
+          this.materials.push(this.createMaterialBindGroup(0.5, 0.5, 0.5));
+          this.materials.push(this.createMaterialBindGroup(0.5, 0, 0));
+          this.materials.push(this.createMaterialBindGroup(0, 0.5, 0));
+          this.materials.push(this.createMaterialBindGroup(0, 0, 0.5));
+          this.materials.push(this.createMaterialBindGroup(0.5, 0.5, 0));
+          this.materials.push(this.createMaterialBindGroup(0.5, 0, 0.5));
+          this.materials.push(this.createMaterialBindGroup(0, 0.5, 0.5));
+
+
+          // Four different geometry types
+          this.geometries.push(new BoxGeometry(device));
+          this.geometries.push(new SphereGeometry(device));
+          this.geometries.push(new CylinderGeometry(device));
+          this.geometries.push(new ConeGeometry(device));
+
+          const module = device.createShaderModule({
+            label: 'Geometry',
+            code: GEOMETRY_SHADER(this.geometries[0]),
+          });
+
           device.createRenderPipelineAsync({
-            label: 'Geometry Pipeline',
+            label: 'Geometry',
             layout: device.createPipelineLayout({ bindGroupLayouts: [
               this.frameBindGroupLayout,
               instanceBindGroupLayout,
+              this.materialBindGroupLayout,
             ]}),
             vertex: {
               module,
               entryPoint: 'vertexMain',
-              buffers: this.cubeGeometry.layout.buffers,
+              buffers: this.geometries[0].layout.buffers,
             },
             primitive: {
-              topology: this.cubeGeometry.layout.topology,
-              stripIndexFormat: this.cubeGeometry.layout.stripIndexFormat,
+              topology: this.geometries[0].layout.topology,
+              stripIndexFormat: this.geometries[0].layout.stripIndexFormat,
             },
             fragment: {
               module,
@@ -184,21 +191,7 @@
             this.pipeline = pipeline;
           });
 
-          this.instanceBuffer = this.device.createBuffer({
-            label: 'Instance',
-            size: MAX_INSTANCE_COUNT * INSTANCE_BYTE_LENGTH,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-          });
-
-          this.instanceBindGroup = this.device.createBindGroup({
-            label: 'Instance',
-            layout: instanceBindGroupLayout,
-            entries: [{
-              binding: 0,
-              resource: { buffer: this.instanceBuffer }
-            }],
-          });
-
+          // Build a bunch of instances with every geometry and material combination
           function createInstanceData() {
             const scale = Math.random() + 0.5;
             const axis = vec3.fromValues(
@@ -215,30 +208,50 @@
               scale: vec3.fromValues(scale, scale, scale),
               axis: axis,
               rotationSpeed: Math.random() * 2 - 1,
-              color: vec4.fromValues(
-                Math.random() * 0.66 + 0.33,
-                Math.random() * 0.66 + 0.33,
-                Math.random() * 0.66 + 0.33,
-                1)
             };
           }
 
-          // Setup the initial instance data
-          this.cubes.first = 0;
-          this.cubes.count = MAX_INSTANCE_COUNT / 4;
-          this.spheres.first = this.cubes.first + this.cubes.count;
-          this.spheres.count = MAX_INSTANCE_COUNT / 4;
-          this.cylinders.first = this.spheres.first + this.spheres.count;
-          this.cylinders.count = MAX_INSTANCE_COUNT / 4;
-          this.cones.first = this.cylinders.first + this.cylinders.count;
-          this.cones.count = MAX_INSTANCE_COUNT / 4;
+          let instanceCount = 0;
+          for (const material of this.materials) {
+            for (const geometry of this.geometries) {
+              let instances = [];
 
-          for (let i = 0; i < MAX_INSTANCE_COUNT / 4; ++i) {
-            this.cubes.instances[i] = createInstanceData();
-            this.spheres.instances[i] = createInstanceData();
-            this.cylinders.instances[i] = createInstanceData();
-            this.cones.instances[i] = createInstanceData();
+              for (let i = 0; i < INSTANCES_PER_DRAWABLE; ++i) {
+                instances.push(createInstanceData());
+              }
+
+              // Sort the instances so the closest ones to the center are drawn
+              // first to improve overdraw
+              instances.sort((a, b) => vec3.length(a.pos) - vec3.length(b.pos));
+
+              this.drawables.push({
+                material,
+                geometry,
+                instances,
+                first: instanceCount,
+                count: INSTANCES_PER_DRAWABLE,
+              });
+
+              instanceCount += INSTANCES_PER_DRAWABLE;
+            }
           }
+
+          this.instanceArray = new Float32Array(instanceCount * INSTANCE_ELEMENT_LENGTH);
+
+          this.instanceBuffer = this.device.createBuffer({
+            label: 'Instance',
+            size: this.instanceArray.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          });
+
+          this.instanceBindGroup = this.device.createBindGroup({
+            label: 'Instance',
+            layout: instanceBindGroupLayout,
+            entries: [{
+              binding: 0,
+              resource: { buffer: this.instanceBuffer }
+            }],
+          });
 
           this.updateInstanceBuffer(performance.now());
 
@@ -258,6 +271,30 @@
           }).on('click', () => { window.location = 'https://github.com/toji/webgpu-bundle-culling' });
         }
 
+        createMaterialBindGroup(r, g, b) {
+          const materialBuffer = this.device.createBuffer({
+            label: `Material (${r}, ${g}, ${b})`,
+            size: Float32Array.BYTES_PER_ELEMENT * 4,
+            usage: GPUBufferUsage.UNIFORM,
+            mappedAtCreation: true,
+          });
+          const materialArray = new Float32Array(materialBuffer.getMappedRange());
+          materialArray[0] = r;
+          materialArray[1] = g;
+          materialArray[2] = b;
+          materialArray[3] = 1;
+          materialBuffer.unmap();
+
+          return this.device.createBindGroup({
+            label: `Material (${r}, ${g}, ${b})`,
+            layout: this.materialBindGroupLayout,
+            entries: [{
+              binding: 0,
+              resource: { buffer: materialBuffer }
+            }],
+          });
+        }
+
         updateShapeInstances(shape, timestamp) {
           for (let i = 0; i < shape.count; ++i) {
             const instance = shape.instances[i];
@@ -271,10 +308,16 @@
         }
 
         updateInstanceBuffer(timestamp) {
-          this.updateShapeInstances(this.cubes, timestamp);
-          this.updateShapeInstances(this.spheres, timestamp);
-          this.updateShapeInstances(this.cylinders, timestamp);
-          this.updateShapeInstances(this.cones, timestamp);
+          for (const drawable of this.drawables) {
+            for (let i = 0; i < drawable.count; ++i) {
+              const instance = drawable.instances[i];
+              quat.setAxisAngle(tempQuat, instance.axis, timestamp * instance.rotationSpeed * 0.001);
+              mat4.fromRotationTranslationScale(tempMat, tempQuat, instance.pos, instance.scale);
+
+              const arrayOffset = (drawable.first + i) * INSTANCE_ELEMENT_LENGTH;
+              this.instanceArray.set(tempMat, arrayOffset);
+            }
+          }
 
           this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceArray);
         }
@@ -284,33 +327,17 @@
           renderEncoder.setBindGroup(1, this.instanceBindGroup);
           renderEncoder.setPipeline(this.pipeline);
 
-          if (instanced) {
-            this.cubeGeometry.setBuffers(renderEncoder);
-            this.cubeGeometry.draw(renderEncoder, this.cubes.count, this.cubes.first);
+          for (const drawable of this.drawables) {
+            renderEncoder.setBindGroup(2, drawable.material);
+            drawable.geometry.setBuffers(renderEncoder);
 
-            this.sphereGeometry.setBuffers(renderEncoder);
-            this.sphereGeometry.draw(renderEncoder, this.spheres.count, this.spheres.first);
-
-            this.cylinderGeometry.setBuffers(renderEncoder);
-            this.cylinderGeometry.draw(renderEncoder, this.cylinders.count, this.cylinders.first);
-
-            this.coneGeometry.setBuffers(renderEncoder);
-            this.coneGeometry.draw(renderEncoder, this.cones.count, this.cones.first);
-          } else {
-            // This route makes a separate draw call for every single shape in the scene.
-            // THIS IS NOT A BEST PRACTICE! Only shown here for educational purposes. Use instancing
-            // where you can.
-            const drawShapes = (shape, geometry) => {
-              geometry.setBuffers(renderEncoder);
-              for (let i = shape.first; i < shape.first + shape.count; ++i) {
-                geometry.draw(renderEncoder, 1, i);
+            if (instanced) {
+              drawable.geometry.draw(renderEncoder, drawable.count, drawable.first);
+            } else {
+              for (let i = drawable.first; i < drawable.first + drawable.count; ++i) {
+                drawable.geometry.draw(renderEncoder, 1, i);
               }
             }
-
-            drawShapes(this.cubes, this.cubeGeometry);
-            drawShapes(this.spheres, this.sphereGeometry);
-            drawShapes(this.cylinders, this.cylinderGeometry);
-            drawShapes(this.cones, this.coneGeometry);
           }
         }
 
