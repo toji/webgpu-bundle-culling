@@ -109,9 +109,10 @@
         fn isVisible(instanceIndex: u32) -> bool {
           let model = instances[instanceIndex];
           let pos = model * vec4(0, 0, 0, 1);
+          let radius = 1.0; // Just fudging it. None of the meshes should be bigger than this.
 
           for (var i = 0; i < 6; i++) {
-            if (dot(camera.frustum[i], pos) < 0) {
+            if (dot(camera.frustum[i], pos) < -radius) {
               return false;
             }
           }
@@ -446,15 +447,6 @@
             .on('change', (ev) => {
               this.renderBundle = null;
             });
-          /*this.pane.addBlade({
-            label: 'render mode',
-            view: 'list',
-            options: RenderModes,
-            value: this.options.renderMode
-          }).on('change', (ev) => {
-            this.options.renderMode = ev.value;
-            this.renderBundle = null;
-          });*/
           this.pane.addBinding(this.options, 'animateScene');
           this.pane.addBinding(this.options, 'showOverhead')
             .on('change', (ev) => {
@@ -655,19 +647,19 @@
                 renderPass.executeBundles([this.getRenderBundle(true, pipeline)]);
                 break;
             }
-          }
 
-          if (this.options.showOverhead) {
-            if (this.canvas.height > this.canvas.width) {
-              renderPass.setViewport(0, this.canvas.height * 0.5, this.canvas.width, this.canvas.height * 0.5, 0, 1);
-            } else {
-              renderPass.setViewport(this.canvas.width * 0.5, 0, this.canvas.width * 0.5, this.canvas.height, 0, 1);
-            }
+            if (this.options.showOverhead) {
+              if (this.canvas.height > this.canvas.width) {
+                renderPass.setViewport(0, this.canvas.height * 0.5, this.canvas.width, this.canvas.height * 0.5, 0, 1);
+              } else {
+                renderPass.setViewport(this.canvas.width * 0.5, 0, this.canvas.width * 0.5, this.canvas.height, 0, 1);
+              }
 
-            if (culled) {
-              this.drawSceneIndirect(renderPass, pipeline, true);
-            } else {
-              this.drawScene(renderPass, true, true);
+              if (culled) {
+                this.drawSceneIndirect(renderPass, pipeline, true);
+              } else {
+                this.drawScene(renderPass, true, true);
+              }
             }
           }
 

@@ -47,6 +47,7 @@ document.head.appendChild(injectedStyle);
 
 const FRAME_BUFFER_SIZE = Float32Array.BYTES_PER_ELEMENT * 64;
 const mat = mat4.create();
+const tmpVec3 = vec3.create();
 
 export class TinyWebGpuDemo {
   #frameArrayBuffer = new ArrayBuffer(FRAME_BUFFER_SIZE);
@@ -167,35 +168,47 @@ export class TinyWebGpuDemo {
     mat4.mul(mat, projection, view);
 
     // Left clipping plane
-    frustum[0] = mat[3] + mat[0];
-    frustum[1] = mat[7] + mat[4];
-    frustum[2] = mat[11] + mat[8];
-    frustum[3] = mat[15] + mat[12];
+    vec3.set(tmpVec3, mat[3] + mat[0], mat[7] + mat[4], mat[11] + mat[8]);
+    let l = vec3.length(tmpVec3);
+    frustum[0] = tmpVec3[0] / l;
+    frustum[1] = tmpVec3[1] / l;
+    frustum[2] = tmpVec3[2] / l;
+    frustum[3] = (mat[15] + mat[12]) / l;
     // Right clipping plane
-    frustum[4] = mat[3] - mat[0];
-    frustum[5] = mat[7] - mat[4];
-    frustum[6] = mat[11] - mat[8];
-    frustum[7] = mat[15] - mat[12];
+    vec3.set(tmpVec3, mat[3] - mat[0], mat[7] - mat[4], mat[11] - mat[8]);
+    l = vec3.length(tmpVec3);
+    frustum[4] = tmpVec3[0] / l;
+    frustum[5] = tmpVec3[1] / l;
+    frustum[6] = tmpVec3[2] / l;
+    frustum[7] = (mat[15] - mat[12]) / l;
     // Top clipping plane
-    frustum[8] = mat[3] - mat[1];
-    frustum[9] = mat[7] - mat[5];
-    frustum[10] = mat[11] - mat[9];
-    frustum[11] = mat[15] - mat[13];
+    vec3.set(tmpVec3, mat[3] - mat[1], mat[7] - mat[5], mat[11] - mat[9]);
+    l = vec3.length(tmpVec3);
+    frustum[8] = tmpVec3[0] / l;
+    frustum[9] = tmpVec3[1] / l;
+    frustum[10] = tmpVec3[2] / l;
+    frustum[11] = (mat[15] - mat[13]) / l;
     // Bottom clipping plane
-    frustum[12] = mat[3] + mat[1];
-    frustum[13] = mat[7] + mat[5];
-    frustum[14] = mat[11] + mat[9];
-    frustum[15] = mat[15] + mat[13];
+    vec3.set(tmpVec3, mat[3] + mat[1], mat[7] + mat[5], mat[11] + mat[9]);
+    l = vec3.length(tmpVec3);
+    frustum[12] = tmpVec3[0] / l;
+    frustum[13] = tmpVec3[1] / l;
+    frustum[14] = tmpVec3[2] / l;
+    frustum[15] = (mat[15] + mat[13]) / l;
     // Near clipping plane
-    frustum[16] = mat[2];
-    frustum[17] = mat[6];
-    frustum[18] = mat[10];
-    frustum[19] = mat[14];
+    vec3.set(tmpVec3, mat[2], mat[6], mat[10]);
+    l = vec3.length(tmpVec3);
+    frustum[16] = tmpVec3[0] / l;
+    frustum[17] = tmpVec3[1] / l;
+    frustum[18] = tmpVec3[2] / l;
+    frustum[19] = mat[14] / l;
     // Far clipping plane
-    frustum[20] = mat[3] - mat[2];
-    frustum[21] = mat[7] - mat[6];
-    frustum[22] = mat[11] - mat[10];
-    frustum[23] = mat[15] - mat[14];
+    vec3.set(tmpVec3, mat[3] - mat[2], mat[7] - mat[6], mat[11] - mat[10]);
+    l = vec3.length(tmpVec3);
+    frustum[20] = tmpVec3[0] / l;
+    frustum[21] = tmpVec3[1] / l;
+    frustum[22] = tmpVec3[2] / l;
+    frustum[23] = (mat[15] - mat[14]) / l;
   }
 
   setError(error, contextString) {
@@ -302,12 +315,12 @@ export class TinyWebGpuDemo {
       }],
     });
 
-    this.statsFolder = this.pane.addFolder({
-      title: 'Stats',
-      expanded: false,
-    });
-    this.statsFolder.addBinding(this, 'fps', {
+    this.pane.addBinding(this, 'fps', {
       readonly: true,
+    });
+    this.statsFolder = this.pane.addFolder({
+      title: 'More Stats',
+      expanded: false,
     });
     this.statsFolder.addBinding(this, 'frameJsMs', {
       readonly: true,
