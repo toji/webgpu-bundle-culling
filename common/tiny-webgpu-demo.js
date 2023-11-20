@@ -45,7 +45,8 @@ injectedStyle.innerText = `
 `;
 document.head.appendChild(injectedStyle);
 
-const FRAME_BUFFER_SIZE = Float32Array.BYTES_PER_ELEMENT * 36;
+const FRAME_BUFFER_SIZE = Float32Array.BYTES_PER_ELEMENT * 64;
+const mat = mat4.create();
 
 export class TinyWebGpuDemo {
   #frameArrayBuffer = new ArrayBuffer(FRAME_BUFFER_SIZE);
@@ -53,6 +54,8 @@ export class TinyWebGpuDemo {
   #viewMatrix = new Float32Array(this.#frameArrayBuffer, 16 * Float32Array.BYTES_PER_ELEMENT, 16);
   #cameraPosition = new Float32Array(this.#frameArrayBuffer, 32 * Float32Array.BYTES_PER_ELEMENT, 3);
   #timeArray = new Float32Array(this.#frameArrayBuffer, 35 * Float32Array.BYTES_PER_ELEMENT, 1);
+  #zRangeArray = new Float32Array(this.#frameArrayBuffer, 36 * Float32Array.BYTES_PER_ELEMENT, 2);
+  #frustum = new Float32Array(this.#frameArrayBuffer, 40 * Float32Array.BYTES_PER_ELEMENT, 24);
 
   static CAMERA_UNIFORM_STRUCT = `
     struct CameraUniforms {
@@ -60,6 +63,8 @@ export class TinyWebGpuDemo {
       view: mat4x4f,
       position: vec3f,
       time: f32,
+      zRange: vec2f,
+      frustum: array<vec4f, 6>
     }
   `;
 
@@ -103,7 +108,7 @@ export class TinyWebGpuDemo {
       this.canvas.width = width;
       this.canvas.height = height;
 
-      this.updateProjection();
+      this.updateProjection(width, height);
 
       if (this.device) {
         const size = {width, height};
@@ -121,6 +126,8 @@ export class TinyWebGpuDemo {
       this.#viewMatrix.set(this.camera.viewMatrix);
       this.#cameraPosition.set(this.camera.position);
       this.#timeArray[0] = t;
+
+      this.buildFrustum(this.#projectionMatrix, this.camera.viewMatrix, this.#frustum);
 
       this.device.queue.writeBuffer(this.frameUniformBuffer, 0, this.#frameArrayBuffer);
 
@@ -146,6 +153,41 @@ export class TinyWebGpuDemo {
     });
   }
 
+  buildFrustum(projection, view, frustum) {
+    mat4.mul(mat, projection, view);
+
+    // Left clipping plane
+    frustum[0] = mat[3] + mat[0];
+    frustum[1] = mat[7] + mat[4];
+    frustum[2] = mat[11] + mat[8];
+    frustum[3] = mat[15] + mat[12];
+    // Right clipping plane
+    frustum[4] = mat[3] - mat[0];
+    frustum[5] = mat[7] - mat[4];
+    frustum[6] = mat[11] - mat[8];
+    frustum[7] = mat[15] - mat[12];
+    // Top clipping plane
+    frustum[8] = mat[3] - mat[1];
+    frustum[9] = mat[7] - mat[5];
+    frustum[10] = mat[11] - mat[9];
+    frustum[11] = mat[15] - mat[13];
+    // Bottom clipping plane
+    frustum[12] = mat[3] + mat[1];
+    frustum[13] = mat[7] + mat[5];
+    frustum[14] = mat[11] + mat[9];
+    frustum[15] = mat[15] + mat[13];
+    // Near clipping plane
+    frustum[16] = mat[2];
+    frustum[17] = mat[6];
+    frustum[18] = mat[10];
+    frustum[19] = mat[14];
+    // Far clipping plane
+    frustum[20] = mat[3] - mat[2];
+    frustum[21] = mat[7] - mat[6];
+    frustum[22] = mat[11] - mat[10];
+    frustum[23] = mat[15] - mat[14];
+  }
+
   setError(error, contextString) {
     let prevError = document.querySelector('.error');
     while (prevError) {
@@ -163,11 +205,13 @@ export class TinyWebGpuDemo {
     }
   }
 
-  updateProjection() {
-    const aspect = this.canvas.width / this.canvas.height;
+  updateProjection(width, height) {
+    const aspect = width / height;
     // Using mat4.perspectiveZO instead of mat4.perpective because WebGPU's
     // normalized device coordinates Z range is [0, 1], instead of WebGL's [-1, 1]
     mat4.perspectiveZO(this.#projectionMatrix, this.fov, aspect, this.zNear, this.zFar);
+    this.#zRangeArray[0] = this.zNear;
+    this.#zRangeArray[1] = this.zFar;
   }
 
   get frameJsMs() {
@@ -186,6 +230,10 @@ export class TinyWebGpuDemo {
       avg += value;
     }
     return avg / this.#frameGpuMs.length;
+  }
+
+  get frameArrayBuffer() {
+    return this.#frameArrayBuffer.slice();
   }
 
   async #initWebGPU() {
@@ -221,7 +269,7 @@ export class TinyWebGpuDemo {
       label: `Frame BindGroupLayout`,
       entries: [{
         binding: 0, // Camera/Frame uniforms
-        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
         buffer: {},
       }],
     });

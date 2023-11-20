@@ -13,6 +13,7 @@
     <canvas class='webgpu-canvas'></canvas>
     <script type="module">
       import { vec3, vec4, mat4, quat } from 'https://cdn.jsdelivr.net/npm/gl-matrix@3.4.3/esm/index.js';
+      import { wgsl } from 'https://cdn.jsdelivr.net/npm/wgsl-preprocessor@1.0/wgsl-preprocessor.js';
       import { TinyWebGpuDemo } from './common/tiny-webgpu-demo.js'
       import { AttribLocation } from './common/geometry.js'
       import { BoxGeometry, SphereGeometry, CylinderGeometry, ConeGeometry } from './common/shapes.js'
@@ -20,10 +21,13 @@
       const tempMat = mat4.create();
       const tempQuat = quat.create();
 
-      const GEOMETRY_SHADER = (geometry) => {
+      const INSTANCES_PER_DRAWABLE = 1000;
+      const INSTANCE_ELEMENT_LENGTH = 16;
+
+      const GEOMETRY_SHADER = (geometry, culled = false) => {
         const layout = geometry.layout;
 
-        return `
+        return wgsl`
           struct VertexIn {
             @builtin(instance_index) instanceIndex : u32,
             @location(${AttribLocation.position}) pos: vec4f,
@@ -37,23 +41,26 @@
             @location(1) uv0: vec2f,
           }
 
-          struct Camera {
-            projection: mat4x4f,
-            view: mat4x4f,
-          }
-          @group(0) @binding(0) var<uniform> camera: Camera;
-
-          @group(1) @binding(0) var<storage, read> instances: array<mat4x4f>;
+          ${TinyWebGpuDemo.CAMERA_UNIFORM_STRUCT}
+          @group(0) @binding(0) var<uniform> camera: CameraUniforms;
 
           struct Material {
             color: vec4f,
           }
-          @group(2) @binding(0) var<uniform> material: Material;
+          @group(1) @binding(0) var<uniform> material: Material;
+
+          @group(2) @binding(0) var<storage, read> instances: array<mat4x4f>;
+          @group(2) @binding(1) var<storage, read> culledInstances: array<u32>;
 
           @vertex
           fn vertexMain(in: VertexIn) -> VertexOut {
             var out: VertexOut;
-            let model = instances[in.instanceIndex];
+          #if ${culled}
+            let instanceIndex = culledInstances[in.instanceIndex];
+          #else
+            let instanceIndex = in.instanceIndex;
+          #endif
+            let model = instances[instanceIndex];
             out.pos = camera.projection * camera.view * model * in.pos;
             out.norm = normalize((camera.view * model * vec4f(in.norm, 0)).xyz);
             out.uv0 = in.uv0;
@@ -80,30 +87,125 @@
         `;
       }
 
-      const INSTANCES_PER_DRAWABLE = 1000;
-      const INSTANCE_ELEMENT_LENGTH = 16;
+      const CULLING_WORKGROUP_SIZE = 64;
+      const CULLING_SHADER = `
+        // TODO: This shader makes assumptions that the radius of every piece
+        // of geometry, pre-transform is initially 0.5 and is centered on the
+        // origin. Obviously that wouldn't hold true for a more generic scene,
+        // so you'd have to pass in size and center information about the
+        // geometry being culled.
+        ${TinyWebGpuDemo.CAMERA_UNIFORM_STRUCT}
+        @group(0) @binding(0) var<uniform> camera: CameraUniforms;
+
+        @group(1) @binding(0) var<storage, read> instances: array<mat4x4f>;
+        @group(1) @binding(1) var<storage, read_write> culledInstances: array<u32>;
+
+        struct IndirectArgs {
+          drawCount: u32,
+          instanceCount: atomic<u32>,
+        }
+        @group(1) @binding(2) var<storage, read_write> indirect: IndirectArgs;
+
+        fn isVisible(instanceIndex: u32) -> bool {
+          let model = instances[instanceIndex];
+          let pos = model * vec4(0, 0, 0, 1);
+
+          for (var i = 0; i < 6; i++) {
+            if (dot(camera.frustum[i], pos) < 0) {
+              return false;
+            }
+          }
+          return true;
+        }
+
+        @compute @workgroup_size(${CULLING_WORKGROUP_SIZE})
+        fn computeMain(@builtin(global_invocation_id) gloablId: vec3u) {
+          let instanceIndex = gloablId.x;
+          if (instanceIndex >= ${INSTANCES_PER_DRAWABLE}) {
+            return;
+          }
+
+          if (!isVisible(instanceIndex)) { return; }
+
+          let culledIndex = atomicAdd(&indirect.instanceCount, 1u);
+          culledInstances[culledIndex] = instanceIndex;
+        }
+      `;
+
+      const FRUSTUM_SHADER = `
+        ${TinyWebGpuDemo.CAMERA_UNIFORM_STRUCT}
+        @group(0) @binding(0) var<uniform> camera: CameraUniforms;
+        @group(1) @binding(0) var<uniform> frustum: CameraUniforms;
+        
+        // Verticies for the projection matrix corners
+        const verts = array<vec3f, 16>(
+          vec3f(-1, -1, 0),
+          vec3f(-1, -1, 1),
+          vec3f(-1, 1, 1),
+          vec3f(-1, 1, 0),
+          vec3f(-1, -1, 0),
+
+          vec3f(1, -1, 0),
+          vec3f(1, -1, 1),
+          vec3f(1, 1, 1),
+          vec3f(1, 1, 0),
+          vec3f(1, -1, 0),
+
+          vec3f(1, 1, 0),
+          vec3f(-1, 1, 0),
+          vec3f(-1, 1, 1),
+          vec3f(1, 1, 1),
+          vec3f(1, -1, 1),
+          vec3f(-1, -1, 1)
+        );
+        
+        @vertex
+        fn vertexMain(@builtin(vertex_index) vertIndex: u32) -> @builtin(position) vec4f {
+          var pos = vec4f(verts[vertIndex], 1);
+          let proj = frustum.projection;
+
+          // Project the corner verts out with the projection and view matrix 
+          let z = proj[3][2] / pos.z - proj[2][2];
+          var worldPos = vec4f(pos.x * z / proj[0][0], pos.y * z / proj[1][1], z, 1);
+          worldPos = transpose(frustum.view) * worldPos;
+   
+          return camera.projection * camera.view * worldPos;
+        }
+
+        @fragment
+        fn fragmentMain() -> @location(0) vec4f {
+          return vec4f(0, 1, 0, 1);
+        }
+      `;
 
       const RenderModes = {
         naive: 0,
         instanced: 1,
-        renderBundleNaive: 2,
-        renderBundleInstanced: 3,
+        indirect: 2,
+        culled: 3,
+        renderBundleNaive: 4,
+        renderBundleInstanced: 5,
+        renderBundleCulled: 6,
       };
 
       export class GridDemo extends TinyWebGpuDemo {
         vertexBuffer = null;
         indexBuffer = null;
-        instanceBuffer = null;
         instanceArray = null;
         geometries = [];
         materials = [];
         drawables = [];
         pipeline = null;
+        culledPipeline = null;
+        cullInstancesPipeline = null;
         renderBundle = null;
+
+        zFar = 512;
 
         options = {
           animateScene: false,
-          renderMode: 1,
+          showOverhead: true, 
+          renderMode: RenderModes.renderBundleCulled,
         };
 
         onInit(device) {
@@ -124,6 +226,27 @@
               binding: 0,
               visibility: GPUShaderStage.VERTEX,
               buffer: { type: 'read-only-storage' }
+            }, {
+              binding: 1,
+              visibility: GPUShaderStage.VERTEX,
+              buffer: { type: 'read-only-storage' }
+            }]
+          });
+
+          const culledInstanceBindGroupLayout = this.device.createBindGroupLayout({
+            layout: 'Culled Instance',
+            entries: [{
+              binding: 0,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'read-only-storage' }
+            }, {
+              binding: 1,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' }
+            }, {
+              binding: 2,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' }
             }]
           });
 
@@ -160,8 +283,8 @@
             label: 'Geometry',
             layout: device.createPipelineLayout({ bindGroupLayouts: [
               this.frameBindGroupLayout,
-              instanceBindGroupLayout,
               this.materialBindGroupLayout,
+              instanceBindGroupLayout,
             ]}),
             vertex: {
               module,
@@ -191,6 +314,118 @@
             this.pipeline = pipeline;
           });
 
+          const culledModule = device.createShaderModule({
+            label: 'Culled Geometry',
+            code: GEOMETRY_SHADER(this.geometries[0], true),
+          });
+
+          device.createRenderPipelineAsync({
+            label: 'Culled Geometry',
+            layout: device.createPipelineLayout({ bindGroupLayouts: [
+              this.frameBindGroupLayout,
+              this.materialBindGroupLayout,
+              instanceBindGroupLayout,
+            ]}),
+            vertex: {
+              module: culledModule,
+              entryPoint: 'vertexMain',
+              buffers: this.geometries[0].layout.buffers,
+            },
+            primitive: {
+              topology: this.geometries[0].layout.topology,
+              stripIndexFormat: this.geometries[0].layout.stripIndexFormat,
+            },
+            fragment: {
+              module: culledModule,
+              entryPoint: 'fragmentMain',
+              targets: [{
+                format: this.colorFormat,
+              }],
+            },
+            depthStencil: {
+              format: this.depthFormat,
+              depthWriteEnabled: true,
+              depthCompare: 'less-equal',
+            },
+            multisample: {
+              count: this.sampleCount ?? 1
+            }
+          }).then((pipeline) => {
+            this.culledPipeline = pipeline;
+          });
+
+          const cullInstanceModule = this.device.createShaderModule({
+            label: 'Cull Instances',
+            code: CULLING_SHADER,
+          });
+
+          device.createComputePipelineAsync({
+            label: 'Cull Instances',
+            layout: device.createPipelineLayout({ bindGroupLayouts: [
+              this.frameBindGroupLayout,
+              culledInstanceBindGroupLayout,
+            ]}),
+            compute: {
+              module: cullInstanceModule,
+              entryPoint: 'computeMain',
+            }
+          }).then((pipeline) => {
+            this.cullInstancesPipeline = pipeline;
+          });
+
+          const frustumDebugModule = this.device.createShaderModule({
+            label: 'Frustum Debug',
+            code: FRUSTUM_SHADER,
+          });
+
+          this.frustumDebugPipeline = device.createRenderPipeline({
+            label: 'Frustum Debug',
+            layout: device.createPipelineLayout({ bindGroupLayouts: [
+              this.frameBindGroupLayout,
+              this.frameBindGroupLayout,
+            ]}),
+            vertex: {
+              module: frustumDebugModule,
+              entryPoint: 'vertexMain',
+            },
+            primitive: {
+              topology: 'line-strip',
+              stripIndexFormat: 'uint16',
+            },
+            fragment: {
+              module: frustumDebugModule,
+              entryPoint: 'fragmentMain',
+              targets: [{
+                format: this.colorFormat,
+              }],
+            },
+            depthStencil: {
+              format: this.depthFormat,
+              depthWriteEnabled: false,
+              depthCompare: 'always',
+            },
+            multisample: {
+              count: this.sampleCount ?? 1
+            }
+          });
+
+          this.overheadFrameUniformBuffer = this.device.createBuffer({
+            size: this.frameUniformBuffer.size,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          });
+
+          // Update the frame uniforms
+          this.updateOverheadView();
+
+          this.overheadFrameBindGroup = this.device.createBindGroup({
+            label: `Overhead Frame BindGroup`,
+            layout: this.frameBindGroupLayout,
+            entries: [{
+              binding: 0, // Camera uniforms
+              resource: { buffer: this.overheadFrameUniformBuffer },
+            }],
+          });
+
           // Build a bunch of instances with every geometry and material combination
           function createInstanceData() {
             const scale = Math.random() + 0.5;
@@ -211,7 +446,8 @@
             };
           }
 
-          let instanceCount = 0;
+          this.instanceArray = new Float32Array(INSTANCES_PER_DRAWABLE * INSTANCE_ELEMENT_LENGTH);
+
           for (const material of this.materials) {
             for (const geometry of this.geometries) {
               let instances = [];
@@ -224,34 +460,68 @@
               // first to improve overdraw
               instances.sort((a, b) => vec3.length(a.pos) - vec3.length(b.pos));
 
+              const instanceBuffer = this.device.createBuffer({
+                label: 'Instance',
+                size: this.instanceArray.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+              });
+
+              const culledInstanceBuffer = this.device.createBuffer({
+                label: 'Culled Instance',
+                size: INSTANCES_PER_DRAWABLE * Uint32Array.BYTES_PER_ELEMENT,
+                usage: GPUBufferUsage.STORAGE
+              });
+
+              const indirectBuffer = this.device.createBuffer({
+                label: 'Instance indirect',
+                size: 20,
+                usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                mappedAtCreation: true,
+              });
+              const indirectArgs = new Uint32Array(indirectBuffer.getMappedRange());
+              indirectArgs[0] = geometry.drawCount;
+              indirectArgs[1] = INSTANCES_PER_DRAWABLE;
+              indirectBuffer.unmap();
+
+              const instanceBindGroup = this.device.createBindGroup({
+                label: 'Instance',
+                layout: instanceBindGroupLayout,
+                entries: [{
+                  binding: 0,
+                  resource: { buffer: instanceBuffer }
+                }, {
+                  binding: 1,
+                  resource: { buffer: culledInstanceBuffer }
+                }],
+              });
+
+              const culledInstanceBindGroup = this.device.createBindGroup({
+                label: 'Culled Instance',
+                layout: culledInstanceBindGroupLayout,
+                entries: [{
+                  binding: 0,
+                  resource: { buffer: instanceBuffer }
+                }, {
+                  binding: 1,
+                  resource: { buffer: culledInstanceBuffer }
+                }, {
+                  binding: 2,
+                  resource: { buffer: indirectBuffer }
+                }],
+              });
+
               this.drawables.push({
                 material,
                 geometry,
                 instances,
-                first: instanceCount,
-                count: INSTANCES_PER_DRAWABLE,
+                instanceCount: INSTANCES_PER_DRAWABLE,
+                instanceBuffer,
+                indirectBuffer,
+                instanceBindGroup,
+                culledInstanceBindGroup,
               });
-
-              instanceCount += INSTANCES_PER_DRAWABLE;
             }
           }
-
-          this.instanceArray = new Float32Array(instanceCount * INSTANCE_ELEMENT_LENGTH);
-
-          this.instanceBuffer = this.device.createBuffer({
-            label: 'Instance',
-            size: this.instanceArray.byteLength,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-          });
-
-          this.instanceBindGroup = this.device.createBindGroup({
-            label: 'Instance',
-            layout: instanceBindGroupLayout,
-            entries: [{
-              binding: 0,
-              resource: { buffer: this.instanceBuffer }
-            }],
-          });
 
           this.updateInstanceBuffer(performance.now());
 
@@ -265,6 +535,10 @@
             this.renderBundle = null;
           });
           this.pane.addBinding(this.options, 'animateScene');
+          this.pane.addBinding(this.options, 'showOverhead')
+            .on('change', (ev) => {
+              this.updateProjection(this.canvas.width, this.canvas.height);
+            });
 
           this.pane.addButton({
             title: 'ViewSource',
@@ -295,6 +569,33 @@
           });
         }
 
+        updateProjection(width, height) {
+          if (this.options.showOverhead) {
+            if (this.canvas.height > this.canvas.width) {
+              super.updateProjection(width, height * 0.5);
+            } else {
+              super.updateProjection(width * 0.5, height);
+            }
+          } else {
+            super.updateProjection(width, height);
+          }
+
+          this.updateOverheadView();
+        }
+
+        updateOverheadView() {
+          if (!this.device) { return; } 
+
+          const frameArrayBuffer = this.frameArrayBuffer;
+          
+          const viewMat = new Float32Array(frameArrayBuffer, 16 * Float32Array.BYTES_PER_ELEMENT, 16);
+          mat4.identity(viewMat);
+          mat4.translate(viewMat, viewMat, [0, 0, -200]);
+          mat4.rotateX(viewMat, viewMat, Math.PI * 0.5);
+
+          this.device.queue.writeBuffer(this.overheadFrameUniformBuffer, 0, frameArrayBuffer);
+        }
+
         updateShapeInstances(shape, timestamp) {
           for (let i = 0; i < shape.count; ++i) {
             const instance = shape.instances[i];
@@ -309,39 +610,56 @@
 
         updateInstanceBuffer(timestamp) {
           for (const drawable of this.drawables) {
-            for (let i = 0; i < drawable.count; ++i) {
+            for (let i = 0; i < drawable.instanceCount; ++i) {
               const instance = drawable.instances[i];
               quat.setAxisAngle(tempQuat, instance.axis, timestamp * instance.rotationSpeed * 0.001);
               mat4.fromRotationTranslationScale(tempMat, tempQuat, instance.pos, instance.scale);
 
-              const arrayOffset = (drawable.first + i) * INSTANCE_ELEMENT_LENGTH;
+              const arrayOffset = i * INSTANCE_ELEMENT_LENGTH;
               this.instanceArray.set(tempMat, arrayOffset);
             }
-          }
 
-          this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceArray);
+            this.device.queue.writeBuffer(drawable.instanceBuffer, 0, this.instanceArray);
+          }
         }
 
-        drawScene(renderEncoder, instanced) {
-          renderEncoder.setBindGroup(0, this.frameBindGroup);
-          renderEncoder.setBindGroup(1, this.instanceBindGroup);
+        drawScene(renderEncoder, instanced, overhead = false) {
+          renderEncoder.setBindGroup(0, overhead ? this.overheadFrameBindGroup: this.frameBindGroup);
           renderEncoder.setPipeline(this.pipeline);
 
           for (const drawable of this.drawables) {
-            renderEncoder.setBindGroup(2, drawable.material);
+            renderEncoder.setBindGroup(1, drawable.material);
+            renderEncoder.setBindGroup(2, drawable.instanceBindGroup);
             drawable.geometry.setBuffers(renderEncoder);
 
             if (instanced) {
-              drawable.geometry.draw(renderEncoder, drawable.count, drawable.first);
+              drawable.geometry.draw(renderEncoder, drawable.instanceCount);
             } else {
-              for (let i = drawable.first; i < drawable.first + drawable.count; ++i) {
+              for (let i = 0; i < drawable.instanceCount; ++i) {
                 drawable.geometry.draw(renderEncoder, 1, i);
               }
             }
           }
         }
 
-        getRenderBundle() {
+        drawSceneIndirect(renderEncoder, pipeline, overhead = false) {
+          renderEncoder.setBindGroup(0, overhead ? this.overheadFrameBindGroup : this.frameBindGroup);
+          renderEncoder.setPipeline(pipeline);
+
+          for (const drawable of this.drawables) {
+            renderEncoder.setBindGroup(1, drawable.material);
+            renderEncoder.setBindGroup(2, drawable.instanceBindGroup);
+            drawable.geometry.setBuffers(renderEncoder);
+
+            if(drawable.geometry.indexBinding) {
+              renderEncoder.drawIndexedIndirect(drawable.indirectBuffer, 0);
+            } else {
+              renderEncoder.drawIndirect(drawable.indirectBuffer, 0);
+            }
+          }
+        }
+
+        getRenderBundle(indirect, pipeline) {
           if (!this.renderBundle) {
             const encoder = this.device.createRenderBundleEncoder({
               colorFormats: [ this.colorFormat ],
@@ -349,22 +667,60 @@
               sampleCount: this.sampleCount
             });
 
-            this.drawScene(encoder, this.options.renderMode == RenderModes.renderBundleInstanced);
-
+            if (indirect) {
+              this.drawSceneIndirect(encoder, pipeline);
+            } else {
+              this.drawScene(encoder, this.options.renderMode == RenderModes.renderBundleInstanced);
+            }
+            
             this.renderBundle = encoder.finish();
           }
           return this.renderBundle;
         }
 
+        cullInstances(commandEncoder) {
+          // Clear the instance count of the indirect buffer for each drawable
+          for (const drawable of this.drawables) {
+            commandEncoder.clearBuffer(drawable.indirectBuffer, 4, 4);
+          }
+
+          // Run a compute shader to find all the visible geometry for each drawable
+          const computePass = commandEncoder.beginComputePass();
+          computePass.setBindGroup(0, this.frameBindGroup);
+          computePass.setPipeline(this.cullInstancesPipeline);
+          for (const drawable of this.drawables) {
+            computePass.setBindGroup(1, drawable.culledInstanceBindGroup);
+            computePass.dispatchWorkgroups(Math.ceil(drawable.instanceCount / CULLING_WORKGROUP_SIZE));
+          }
+          computePass.end();
+        }
+
         onFrame(device, context, timestamp) {
           const commandEncoder = device.createCommandEncoder();
-          const renderPass = commandEncoder.beginRenderPass(this.defaultRenderPassDescriptor);
 
           if (this.options.animateScene) {
             this.updateInstanceBuffer(timestamp);
           }
 
-          if (this.pipeline) {
+          const culled = this.options.renderMode == RenderModes.culled ||
+                         this.options.renderMode == RenderModes.renderBundleCulled;
+
+          if (culled && this.cullInstancesPipeline) {
+            this.cullInstances(commandEncoder);
+          }
+
+          const renderPass = commandEncoder.beginRenderPass(this.defaultRenderPassDescriptor);
+
+          if (this.options.showOverhead) {
+            if (this.canvas.height > this.canvas.width) {
+              renderPass.setViewport(0, 0, this.canvas.width, this.canvas.height * 0.5, 0, 1);
+            } else {
+              renderPass.setViewport(0, 0, this.canvas.width * 0.5, this.canvas.height, 0, 1);
+            }
+          }
+
+          let pipeline = culled ? this.culledPipeline : this.pipeline;
+          if (pipeline) {
             switch (this.options.renderMode) {
               case RenderModes.naive:
                 this.drawScene(renderPass, false);
@@ -372,11 +728,37 @@
               case RenderModes.instanced:
                 this.drawScene(renderPass, true);
                 break;
+              case RenderModes.indirect:
+              case RenderModes.culled:
+                this.drawSceneIndirect(renderPass, pipeline);
+                break;
               case RenderModes.renderBundleNaive:
               case RenderModes.renderBundleInstanced:
-                renderPass.executeBundles([this.getRenderBundle()]);
+                renderPass.executeBundles([this.getRenderBundle(false, pipeline)]);
+                break;
+              case RenderModes.renderBundleCulled:
+                renderPass.executeBundles([this.getRenderBundle(true, pipeline)]);
                 break;
             }
+          }
+
+          if (this.options.showOverhead) {
+            if (this.canvas.height > this.canvas.width) {
+              renderPass.setViewport(0, this.canvas.height * 0.5, this.canvas.width, this.canvas.height * 0.5, 0, 1);
+            } else {
+              renderPass.setViewport(this.canvas.width * 0.5, 0, this.canvas.width * 0.5, this.canvas.height, 0, 1);
+            }
+
+            if (culled) {
+              this.drawSceneIndirect(renderPass, pipeline, true);
+            } else {
+              this.drawScene(renderPass, true, true);
+            }
+
+            // Draw a debug frustum outline
+            /*renderPass.setPipeline(this.frustumDebugPipeline);
+            renderPass.setBindGroup(1, this.frameBindGroup);
+            renderPass.draw(16);*/
           }
 
           renderPass.end();
