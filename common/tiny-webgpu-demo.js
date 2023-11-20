@@ -68,6 +68,9 @@ export class TinyWebGpuDemo {
     }
   `;
 
+  #fps = new Array(20);
+  #fpsIndex = 0;
+
   #frameJsMs = new Array(20);
   #frameJsMsIndex = 0;
 
@@ -117,6 +120,8 @@ export class TinyWebGpuDemo {
       }
     });
 
+    let lastFrameTime;
+
     const frameCallback = (t) => {
       requestAnimationFrame(frameCallback);
 
@@ -138,6 +143,10 @@ export class TinyWebGpuDemo {
       if (this.timestampQuerySet) {
         this.#readbackTimestampQuery();
       }
+
+      const frameTime = performance.now();
+      this.#fps[this.#fpsIndex++ % this.#fps.length] = frameTime - lastFrameTime;
+      lastFrameTime = frameTime;
     };
 
     this.#initWebGPU().then(() => {
@@ -145,6 +154,7 @@ export class TinyWebGpuDemo {
       // initialized.
       this.resizeObserver.callback(this.canvas.width, this.canvas.height);
       // Start the render loop.
+      lastFrameTime = performance.now();
       requestAnimationFrame(frameCallback);
     }).catch((error) => {
       // If something goes wrong during initialization, put up a really simple error message.
@@ -214,10 +224,19 @@ export class TinyWebGpuDemo {
     this.#zRangeArray[1] = this.zFar;
   }
 
+  get fps() {
+    let avg = 0;
+    for (const value of this.#fps) {
+      if (value === undefined) { return 0; } // Don't have enough samples yet
+      avg += value;
+    }
+    return 1000 / (avg / this.#fps.length);
+  }
+
   get frameJsMs() {
     let avg = 0;
     for (const value of this.#frameJsMs) {
-      if (value === undefined) { return 0; } // Don't have enough sampled yet
+      if (value === undefined) { return 0; } // Don't have enough samples yet
       avg += value;
     }
     return avg / this.#frameJsMs.length;
@@ -226,7 +245,7 @@ export class TinyWebGpuDemo {
   get frameGpuMs() {
     let avg = 0;
     for (const value of this.#frameGpuMs) {
-      if (value === undefined) { return 0; } // Don't have enough sampled yet
+      if (value === undefined) { return 0; } // Don't have enough samples yet
       avg += value;
     }
     return avg / this.#frameGpuMs.length;
@@ -287,11 +306,14 @@ export class TinyWebGpuDemo {
       title: 'Stats',
       expanded: false,
     });
+    this.statsFolder.addBinding(this, 'fps', {
+      readonly: true,
+    });
     this.statsFolder.addBinding(this, 'frameJsMs', {
       readonly: true,
       view: 'graph',
-      min: 0,
-      max: 32
+      //min: 0,
+      //max: 32
     });
 
     if (this.device.features.has('timestamp-query')) {
@@ -309,8 +331,8 @@ export class TinyWebGpuDemo {
       this.statsFolder.addBinding(this, 'frameGpuMs', {
         readonly: true,
         view: 'graph',
-        min: 0,
-        max: 32
+        //min: 0,
+        //max: 32
       });
     }
 

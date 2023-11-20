@@ -132,60 +132,13 @@
         }
       `;
 
-      const FRUSTUM_SHADER = `
-        ${TinyWebGpuDemo.CAMERA_UNIFORM_STRUCT}
-        @group(0) @binding(0) var<uniform> camera: CameraUniforms;
-        @group(1) @binding(0) var<uniform> frustum: CameraUniforms;
-        
-        // Verticies for the projection matrix corners
-        const verts = array<vec3f, 16>(
-          vec3f(-1, -1, 0),
-          vec3f(-1, -1, 1),
-          vec3f(-1, 1, 1),
-          vec3f(-1, 1, 0),
-          vec3f(-1, -1, 0),
-
-          vec3f(1, -1, 0),
-          vec3f(1, -1, 1),
-          vec3f(1, 1, 1),
-          vec3f(1, 1, 0),
-          vec3f(1, -1, 0),
-
-          vec3f(1, 1, 0),
-          vec3f(-1, 1, 0),
-          vec3f(-1, 1, 1),
-          vec3f(1, 1, 1),
-          vec3f(1, -1, 1),
-          vec3f(-1, -1, 1)
-        );
-        
-        @vertex
-        fn vertexMain(@builtin(vertex_index) vertIndex: u32) -> @builtin(position) vec4f {
-          var pos = vec4f(verts[vertIndex], 1);
-          let proj = frustum.projection;
-
-          // Project the corner verts out with the projection and view matrix 
-          let z = proj[3][2] / pos.z - proj[2][2];
-          var worldPos = vec4f(pos.x * z / proj[0][0], pos.y * z / proj[1][1], z, 1);
-          worldPos = transpose(frustum.view) * worldPos;
-   
-          return camera.projection * camera.view * worldPos;
-        }
-
-        @fragment
-        fn fragmentMain() -> @location(0) vec4f {
-          return vec4f(0, 1, 0, 1);
-        }
-      `;
-
       const RenderModes = {
         naive: 0,
         instanced: 1,
-        indirect: 2,
-        culled: 3,
-        renderBundleNaive: 4,
-        renderBundleInstanced: 5,
-        renderBundleCulled: 6,
+        culled: 2,
+        renderBundleNaive: 3,
+        renderBundleInstanced: 4,
+        renderBundleCulled: 5,
       };
 
       export class GridDemo extends TinyWebGpuDemo {
@@ -373,42 +326,6 @@
             this.cullInstancesPipeline = pipeline;
           });
 
-          const frustumDebugModule = this.device.createShaderModule({
-            label: 'Frustum Debug',
-            code: FRUSTUM_SHADER,
-          });
-
-          this.frustumDebugPipeline = device.createRenderPipeline({
-            label: 'Frustum Debug',
-            layout: device.createPipelineLayout({ bindGroupLayouts: [
-              this.frameBindGroupLayout,
-              this.frameBindGroupLayout,
-            ]}),
-            vertex: {
-              module: frustumDebugModule,
-              entryPoint: 'vertexMain',
-            },
-            primitive: {
-              topology: 'line-strip',
-              stripIndexFormat: 'uint16',
-            },
-            fragment: {
-              module: frustumDebugModule,
-              entryPoint: 'fragmentMain',
-              targets: [{
-                format: this.colorFormat,
-              }],
-            },
-            depthStencil: {
-              format: this.depthFormat,
-              depthWriteEnabled: false,
-              depthCompare: 'always',
-            },
-            multisample: {
-              count: this.sampleCount ?? 1
-            }
-          });
-
           this.overheadFrameUniformBuffer = this.device.createBuffer({
             size: this.frameUniformBuffer.size,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -525,7 +442,11 @@
 
           this.updateInstanceBuffer(performance.now());
 
-          this.pane.addBlade({
+          this.pane.addBinding(this.options, 'renderMode', { options: RenderModes })
+            .on('change', (ev) => {
+              this.renderBundle = null;
+            });
+          /*this.pane.addBlade({
             label: 'render mode',
             view: 'list',
             options: RenderModes,
@@ -533,7 +454,7 @@
           }).on('change', (ev) => {
             this.options.renderMode = ev.value;
             this.renderBundle = null;
-          });
+          });*/
           this.pane.addBinding(this.options, 'animateScene');
           this.pane.addBinding(this.options, 'showOverhead')
             .on('change', (ev) => {
@@ -596,21 +517,13 @@
           this.device.queue.writeBuffer(this.overheadFrameUniformBuffer, 0, frameArrayBuffer);
         }
 
-        updateShapeInstances(shape, timestamp) {
-          for (let i = 0; i < shape.count; ++i) {
-            const instance = shape.instances[i];
-            quat.setAxisAngle(tempQuat, instance.axis, timestamp * instance.rotationSpeed * 0.001);
-            mat4.fromRotationTranslationScale(tempMat, tempQuat, instance.pos, instance.scale);
-
-            const arrayOffset = (shape.first + i) * INSTANCE_ELEMENT_LENGTH;
-            this.instanceArray.set(tempMat, arrayOffset);
-            this.instanceArray.set(instance.color, arrayOffset + 16);
-          }
-        }
-
-        updateInstanceBuffer(timestamp) {
+        updateInstanceBuffer(timestamp, animating = false) {
           for (const drawable of this.drawables) {
-            for (let i = 0; i < drawable.instanceCount; ++i) {
+            // When animating don't animate EVERY instance. Eats up too much JS time, especially on mobile.
+            // Because the scene is sorted to draw the nearest geometry first, it will look like most of the
+            // scene is animating from the users POV.
+            const instanceCount = animating ? Math.floor(drawable.instanceCount / 4) : drawable.instanceCount;
+            for (let i = 0; i < instanceCount; ++i) {
               const instance = drawable.instances[i];
               quat.setAxisAngle(tempQuat, instance.axis, timestamp * instance.rotationSpeed * 0.001);
               mat4.fromRotationTranslationScale(tempMat, tempQuat, instance.pos, instance.scale);
@@ -619,7 +532,10 @@
               this.instanceArray.set(tempMat, arrayOffset);
             }
 
-            this.device.queue.writeBuffer(drawable.instanceBuffer, 0, this.instanceArray);
+            this.device.queue.writeBuffer(
+              drawable.instanceBuffer, 0, this.instanceArray, 0,
+              instanceCount * INSTANCE_ELEMENT_LENGTH
+            );
           }
         }
 
@@ -699,7 +615,7 @@
           const commandEncoder = device.createCommandEncoder();
 
           if (this.options.animateScene) {
-            this.updateInstanceBuffer(timestamp);
+            this.updateInstanceBuffer(timestamp, true);
           }
 
           const culled = this.options.renderMode == RenderModes.culled ||
@@ -728,7 +644,6 @@
               case RenderModes.instanced:
                 this.drawScene(renderPass, true);
                 break;
-              case RenderModes.indirect:
               case RenderModes.culled:
                 this.drawSceneIndirect(renderPass, pipeline);
                 break;
@@ -754,11 +669,6 @@
             } else {
               this.drawScene(renderPass, true, true);
             }
-
-            // Draw a debug frustum outline
-            /*renderPass.setPipeline(this.frustumDebugPipeline);
-            renderPass.setBindGroup(1, this.frameBindGroup);
-            renderPass.draw(16);*/
           }
 
           renderPass.end();
