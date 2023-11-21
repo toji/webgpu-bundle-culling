@@ -14,6 +14,7 @@
     <script type="module">
       import { vec3, vec4, mat4, quat } from 'https://cdn.jsdelivr.net/npm/gl-matrix@3.4.3/esm/index.js';
       import { wgsl } from 'https://cdn.jsdelivr.net/npm/wgsl-preprocessor@1.0/wgsl-preprocessor.js';
+      import { QueryArgs } from './common/query-args.js';
       import { TinyWebGpuDemo } from './common/tiny-webgpu-demo.js'
       import { AttribLocation } from './common/geometry.js'
       import { BoxGeometry, SphereGeometry, CylinderGeometry, ConeGeometry } from './common/shapes.js'
@@ -21,7 +22,7 @@
       const tempMat = mat4.create();
       const tempQuat = quat.create();
 
-      const INSTANCES_PER_DRAWABLE = 1000;
+      const INSTANCES_PER_DRAWABLE = QueryArgs.getInt("instancesPerDrawable", navigator.userAgentData?.mobile ? 500 : 1000);
       const INSTANCE_ELEMENT_LENGTH = 16;
 
       const GEOMETRY_SHADER = (geometry, culled = false) => {
