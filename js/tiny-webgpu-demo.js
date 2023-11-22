@@ -89,10 +89,6 @@ export class TinyWebGpuDemo {
   #canvasResolution = { width: 1, height: 1 };
   #resolutionScale = 1;
 
-  timestampQuerySet;
-  timestampResolveBuffer;
-  timestampReadbackBuffers = [];
-
   constructor() {
     this.canvas = document.querySelector('.webgpu-canvas');
 
@@ -133,10 +129,6 @@ export class TinyWebGpuDemo {
       this.onFrame(this.device, this.context, t);
 
       this.#frameJsMs[this.#frameJsMsIndex++ % this.#frameJsMs.length] = performance.now() - frameStart;
-
-      if (this.timestampQuerySet) {
-        this.#readbackTimestampQuery();
-      }
 
       const frameTime = performance.now();
       this.#fps[this.#fpsIndex++ % this.#fps.length] = frameTime - lastFrameTime;
@@ -345,26 +337,6 @@ export class TinyWebGpuDemo {
       //min: 0,
       //max: 32
     });
-
-    if (this.device.features.has('timestamp-query')) {
-      this.timestampQuerySet = this.device.createQuerySet({
-        label: 'Timestamp',
-        type: 'timestamp',
-        count: 2,
-      });
-
-      this.timestampResolveBuffer = this.device.createBuffer({
-        size: BigUint64Array.BYTES_PER_ELEMENT * 2,
-        usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
-      });
-
-      this.statsFolder.addBinding(this, 'frameGpuMs', {
-        readonly: true,
-        view: 'graph',
-        //min: 0,
-        //max: 32
-      });
-    }
 
     await this.onInit(this.device);
   }

@@ -17,6 +17,7 @@
       import { QueryArgs } from './js/query-args.js';
       import { TinyWebGpuDemo } from './js/tiny-webgpu-demo.js'
       import { AttribLocation } from './js/geometry.js'
+      import { TimestampHelper } from './js/timestamp-helper.js'
       import { BoxGeometry, SphereGeometry, CylinderGeometry, ConeGeometry } from './js/shapes.js'
 
       const tempMat = mat4.create();
@@ -165,6 +166,15 @@
 
         onInit(device) {
           this.camera.distance = 3;
+          this.timestampHelper = new TimestampHelper(device);
+
+          if (this.timestampHelper.timestampsSupported) {
+            this.statsFolder.addBinding(this.timestampHelper.averages, 'TOTAL', {
+              label: 'frameGpuMs',
+              readonly: true,
+              view: 'graph',
+            });
+          }
 
           this.materialBindGroupLayout = this.device.createBindGroupLayout({
             layout: 'Material',
@@ -597,7 +607,9 @@
           }
 
           // Run a compute shader to find all the visible geometry for each drawable
-          const computePass = commandEncoder.beginComputePass();
+          const computePass = commandEncoder.beginComputePass({
+            timestampWrites: this.timestampHelper.timestampWrites('compute'),
+          });
           computePass.setBindGroup(0, this.frameBindGroup);
           computePass.setPipeline(this.cullInstancesPipeline);
           for (const drawable of this.drawables) {
@@ -621,7 +633,9 @@
             this.cullInstances(commandEncoder);
           }
 
-          const renderPass = commandEncoder.beginRenderPass(this.defaultRenderPassDescriptor);
+          const renderPassDesc = this.defaultRenderPassDescriptor;
+          renderPassDesc.timestampWrites = this.timestampHelper.timestampWrites('render');
+          const renderPass = commandEncoder.beginRenderPass(renderPassDesc);
 
           if (this.options.showOverhead) {
             if (this.canvas.height > this.canvas.width) {
@@ -669,7 +683,11 @@
 
           renderPass.end();
 
+          this.timestampHelper.resolve(commandEncoder);
+
           device.queue.submit([commandEncoder.finish()]);
+
+          this.timestampHelper.read();
         }
       }
 
