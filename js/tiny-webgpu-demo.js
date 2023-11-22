@@ -325,6 +325,7 @@ export class TinyWebGpuDemo {
     });
 
     this.pane.addBinding(this, 'fps', {
+      label: 'FPS',
       readonly: true,
     });
     this.statsFolder = this.pane.addFolder({
@@ -332,10 +333,15 @@ export class TinyWebGpuDemo {
       expanded: false,
     });
     this.statsFolder.addBinding(this, 'frameJsMs', {
+      label: 'Frame JS ms',
       readonly: true,
       view: 'graph',
       //min: 0,
       //max: 32
+    });
+    this.statsFolder.addBinding(this, 'frameJsMs', {
+      label: '',
+      readonly: true,
     });
 
     await this.onInit(this.device);

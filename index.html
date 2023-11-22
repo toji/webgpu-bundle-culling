@@ -175,16 +175,16 @@
             this.timestampHelper.averages.TOTAL = 0;
 
             this.statsFolder.addBinding(this.timestampHelper.averages, 'TOTAL', {
-              label: 'gpuTotalMs',
+              label: 'Frame GPU ms',
               readonly: true,
               view: 'graph',
             });
             this.statsFolder.addBinding(this.timestampHelper.averages, 'compute', {
-              label: 'gpuComputeMs',
+              label: '- Compute ms',
               readonly: true,
             });
             this.statsFolder.addBinding(this.timestampHelper.averages, 'render', {
-              label: 'gpuRenderMs',
+              label: '- Render ms',
               readonly: true,
             });
           }
