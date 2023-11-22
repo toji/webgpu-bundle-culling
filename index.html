@@ -169,10 +169,23 @@
           this.timestampHelper = new TimestampHelper(device);
 
           if (this.timestampHelper.timestampsSupported) {
+            // This just makes sure that Tweakpane can see the keys before the first timestamp reading.
+            this.timestampHelper.averages.compute = 0;
+            this.timestampHelper.averages.render = 0;
+            this.timestampHelper.averages.TOTAL = 0;
+
             this.statsFolder.addBinding(this.timestampHelper.averages, 'TOTAL', {
-              label: 'frameGpuMs',
+              label: 'gpuTotalMs',
               readonly: true,
               view: 'graph',
+            });
+            this.statsFolder.addBinding(this.timestampHelper.averages, 'compute', {
+              label: 'gpuComputeMs',
+              readonly: true,
+            });
+            this.statsFolder.addBinding(this.timestampHelper.averages, 'render', {
+              label: 'gpuRenderMs',
+              readonly: true,
             });
           }
 

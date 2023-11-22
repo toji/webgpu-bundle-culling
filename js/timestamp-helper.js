@@ -104,6 +104,7 @@ export class TimestampHelper {
     const results = {};
     let updateAverageTotal = false;
     let total = 0;
+
     for (const [ name, query ] of queries.entries()) {
       const passTime = Number(mappedArray[query.end] - mappedArray[query.begin]);
       // Discard negative times
@@ -132,6 +133,26 @@ export class TimestampHelper {
         total += passTimeMs;
       }
     }
+
+    // Update any existing keys not in the queries to 0. This way if one of them
+    // isn't present in the readback it will zero out instead of appearing to
+    // stay steady at the last reading.
+    for (const name of this.#passTimings.keys()) {
+      if (!queries.has(name)) {
+        let passTimings = this.#passTimings.get(name);
+        passTimings.values[passTimings.index++ % AVG_SAMPLE_COUNT] = 0;
+        if (passTimings.index % AVG_SAMPLE_COUNT == 0) {
+          // Update the average
+          let avg = 0;
+          for (const value of passTimings.values) {
+            avg += value;
+          }
+          this.#averages[name] = avg / AVG_SAMPLE_COUNT;
+          updateAverageTotal = true;
+        }
+      }
+    }
+
     results.TOTAL = total;
 
     if (updateAverageTotal) {
@@ -146,12 +167,6 @@ export class TimestampHelper {
   }
 
   get averages() {
-    let total = 0;
-    for (const [name, timing] of this.#passTimings.entries()) {
-      this.#averages[name] = timing.average;
-      total += timing.average;
-    }
-    this.#averages.TOTAL = total;
     return this.#averages;
   }
 }
