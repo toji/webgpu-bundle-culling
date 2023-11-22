@@ -14,10 +14,10 @@
     <script type="module">
       import { vec3, vec4, mat4, quat } from 'https://cdn.jsdelivr.net/npm/gl-matrix@3.4.3/esm/index.js';
       import { wgsl } from 'https://cdn.jsdelivr.net/npm/wgsl-preprocessor@1.0/wgsl-preprocessor.js';
-      import { QueryArgs } from './common/query-args.js';
-      import { TinyWebGpuDemo } from './common/tiny-webgpu-demo.js'
-      import { AttribLocation } from './common/geometry.js'
-      import { BoxGeometry, SphereGeometry, CylinderGeometry, ConeGeometry } from './common/shapes.js'
+      import { QueryArgs } from './js/query-args.js';
+      import { TinyWebGpuDemo } from './js/tiny-webgpu-demo.js'
+      import { AttribLocation } from './js/geometry.js'
+      import { BoxGeometry, SphereGeometry, CylinderGeometry, ConeGeometry } from './js/shapes.js'
 
       const tempMat = mat4.create();
       const tempQuat = quat.create();
@@ -221,7 +221,6 @@
           this.materials.push(this.createMaterialBindGroup(0.5, 0.5, 0));
           this.materials.push(this.createMaterialBindGroup(0.5, 0, 0.5));
           this.materials.push(this.createMaterialBindGroup(0, 0.5, 0.5));
-
 
           // Four different geometry types
           this.geometries.push(new BoxGeometry(device));
@@ -447,6 +446,10 @@
           this.pane.addBinding(this.options, 'renderMode', { options: RenderModes })
             .on('change', (ev) => {
               this.renderBundle = null;
+            });
+          this.pane.addBinding(this, 'resolutionScale', { min: 0.25, max: 1.0, step: 0.25 })
+            .on('change', (ev) => {
+              this.updateProjection(this.canvas.width, this.canvas.height);
             });
           this.pane.addBinding(this.options, 'animateScene');
           this.pane.addBinding(this.options, 'showOverhead')

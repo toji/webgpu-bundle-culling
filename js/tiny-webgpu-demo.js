@@ -86,6 +86,8 @@ export class TinyWebGpuDemo {
   fov = Math.PI * 0.5;
   zNear = 0.01;
   zFar = 128;
+  #canvasResolution = { width: 1, height: 1 };
+  #resolutionScale = 1;
 
   timestampQuerySet;
   timestampResolveBuffer;
@@ -108,17 +110,8 @@ export class TinyWebGpuDemo {
 
     this.resizeObserver = new ResizeObserverHelper(this.canvas, (width, height) => {
       if (width == 0 || height == 0) { return; }
-
-      this.canvas.width = width;
-      this.canvas.height = height;
-
-      this.updateProjection(width, height);
-
-      if (this.device) {
-        const size = {width, height};
-        this.#allocateRenderTargets(size);
-        this.onResize(this.device, size);
-      }
+      this.#canvasResolution = { width, height };
+      this.#updateResolution();
     });
 
     let lastFrameTime;
@@ -228,6 +221,19 @@ export class TinyWebGpuDemo {
     }
   }
 
+  #updateResolution() {
+    this.canvas.width = this.#canvasResolution.width * this.#resolutionScale;
+    this.canvas.height = this.#canvasResolution.height * this.#resolutionScale;
+
+    this.updateProjection(this.canvas.width, this.canvas.height);
+
+    if (this.device) {
+      const size = {width: this.canvas.width, height: this.canvas.height};
+      this.#allocateRenderTargets(size);
+      this.onResize(this.device, size);
+    }
+  }
+
   updateProjection(width, height) {
     const aspect = width / height;
     // Using mat4.perspectiveZO instead of mat4.perpective because WebGPU's
@@ -235,6 +241,17 @@ export class TinyWebGpuDemo {
     mat4.perspectiveZO(this.#projectionMatrix, this.fov, aspect, this.zNear, this.zFar);
     this.#zRangeArray[0] = this.zNear;
     this.#zRangeArray[1] = this.zFar;
+  }
+
+  get resolutionScale() {
+    return this.#resolutionScale;
+  }
+
+  set resolutionScale(value) {
+    if (this.#resolutionScale != value) {
+      this.#resolutionScale = value;
+      this.#updateResolution();
+    }
   }
 
   get fps() {
