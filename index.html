@@ -154,7 +154,7 @@
         pipeline = null;
         culledPipeline = null;
         cullInstancesPipeline = null;
-        renderBundle = null;
+        renderBundles = new Map();
 
         zFar = 512;
 
@@ -466,10 +466,7 @@
 
           this.updateInstanceBuffer(performance.now());
 
-          this.pane.addBinding(this.options, 'renderMode', { options: RenderModes })
-            .on('change', (ev) => {
-              this.renderBundle = null;
-            });
+          this.pane.addBinding(this.options, 'renderMode', { options: RenderModes });
           this.pane.addBinding(this, 'resolutionScale', { min: 0.25, max: 1.0, step: 0.25 })
             .on('change', (ev) => {
               this.updateProjection(this.canvas.width, this.canvas.height);
@@ -558,61 +555,6 @@
           }
         }
 
-        drawScene(renderEncoder, instanced, overhead = false) {
-          renderEncoder.setBindGroup(0, overhead ? this.overheadFrameBindGroup: this.frameBindGroup);
-          renderEncoder.setPipeline(this.pipeline);
-
-          for (const drawable of this.drawables) {
-            renderEncoder.setBindGroup(1, drawable.material);
-            renderEncoder.setBindGroup(2, drawable.instanceBindGroup);
-            drawable.geometry.setBuffers(renderEncoder);
-
-            if (instanced) {
-              drawable.geometry.draw(renderEncoder, drawable.instanceCount);
-            } else {
-              for (let i = 0; i < drawable.instanceCount; ++i) {
-                drawable.geometry.draw(renderEncoder, 1, i);
-              }
-            }
-          }
-        }
-
-        drawSceneIndirect(renderEncoder, pipeline, overhead = false) {
-          renderEncoder.setBindGroup(0, overhead ? this.overheadFrameBindGroup : this.frameBindGroup);
-          renderEncoder.setPipeline(pipeline);
-
-          for (const drawable of this.drawables) {
-            renderEncoder.setBindGroup(1, drawable.material);
-            renderEncoder.setBindGroup(2, drawable.instanceBindGroup);
-            drawable.geometry.setBuffers(renderEncoder);
-
-            if(drawable.geometry.indexBinding) {
-              renderEncoder.drawIndexedIndirect(drawable.indirectBuffer, 0);
-            } else {
-              renderEncoder.drawIndirect(drawable.indirectBuffer, 0);
-            }
-          }
-        }
-
-        getRenderBundle(indirect, pipeline) {
-          if (!this.renderBundle) {
-            const encoder = this.device.createRenderBundleEncoder({
-              colorFormats: [ this.colorFormat ],
-              depthStencilFormat: this.depthFormat,
-              sampleCount: this.sampleCount
-            });
-
-            if (indirect) {
-              this.drawSceneIndirect(encoder, pipeline);
-            } else {
-              this.drawScene(encoder, this.options.renderMode == RenderModes.renderBundleInstanced);
-            }
-
-            this.renderBundle = encoder.finish();
-          }
-          return this.renderBundle;
-        }
-
         cullInstances(commandEncoder) {
           // Clear the instance count of the indirect buffer for each drawable
           for (const drawable of this.drawables) {
@@ -630,6 +572,61 @@
             computePass.dispatchWorkgroups(Math.ceil(drawable.instanceCount / CULLING_WORKGROUP_SIZE));
           }
           computePass.end();
+        }
+
+        drawScene(renderEncoder, mode, pipeline, frameBindGroup) {
+          renderEncoder.setBindGroup(0, frameBindGroup);
+          renderEncoder.setPipeline(pipeline);
+
+          for (const drawable of this.drawables) {
+            renderEncoder.setBindGroup(1, drawable.material);
+            renderEncoder.setBindGroup(2, drawable.instanceBindGroup);
+            drawable.geometry.setBuffers(renderEncoder);
+
+            switch (this.options.renderMode % 3) {
+              case RenderModes.naive:
+                for (let i = 0; i < drawable.instanceCount; ++i) {
+                  drawable.geometry.draw(renderEncoder, 1, i);
+                }
+                break;
+
+              case RenderModes.instanced:
+                drawable.geometry.draw(renderEncoder, drawable.instanceCount);
+                break;
+
+              case RenderModes.culled:
+                if(drawable.geometry.indexBinding) {
+                  renderEncoder.drawIndexedIndirect(drawable.indirectBuffer, 0);
+                } else {
+                  renderEncoder.drawIndirect(drawable.indirectBuffer, 0);
+                }
+                break;
+            }
+          }
+        }
+
+        getRenderBundle(mode, pipeline, overhead = false) {
+          const key = mode + (overhead ? 3 : 0);
+          let renderBundle = this.renderBundles.get(key);
+
+          // If the render bundle doesn't exist yet, create it the first time
+          // the bundle is requested.
+          if (!renderBundle) {
+            const encoder = this.device.createRenderBundleEncoder({
+              colorFormats: [ this.colorFormat ],
+              depthStencilFormat: this.depthFormat,
+              sampleCount: this.sampleCount
+            });
+
+            // Call the exact same function as the non-bundled draw
+            this.drawScene(encoder, mode, pipeline, overhead ? this.overheadFrameBindGroup : this.frameBindGroup);
+
+            renderBundle = encoder.finish();
+
+            // Cache the render bundle for the given rendering mode.
+            this.renderBundles.set(key, renderBundle);
+          }
+          return renderBundle;
         }
 
         onFrame(device, context, timestamp) {
@@ -678,24 +675,18 @@
             }
           }
 
-          let pipeline = culled ? this.culledPipeline : this.pipeline;
+          const pipeline = culled ? this.culledPipeline : this.pipeline;
           if (pipeline) {
             switch (this.options.renderMode) {
               case RenderModes.naive:
-                this.drawScene(renderPass, false);
-                break;
               case RenderModes.instanced:
-                this.drawScene(renderPass, true);
-                break;
               case RenderModes.culled:
-                this.drawSceneIndirect(renderPass, pipeline);
+                this.drawScene(renderPass, this.options.renderMode, pipeline, this.frameBindGroup);
                 break;
               case RenderModes.renderBundleNaive:
               case RenderModes.renderBundleInstanced:
-                renderPass.executeBundles([this.getRenderBundle(false, pipeline)]);
-                break;
               case RenderModes.renderBundleCulled:
-                renderPass.executeBundles([this.getRenderBundle(true, pipeline)]);
+                renderPass.executeBundles([this.getRenderBundle(this.options.renderMode, pipeline)]);
                 break;
             }
 
@@ -722,10 +713,17 @@
                 renderPass.setViewport(this.canvas.width * 0.5, 0, this.canvas.width * 0.5, this.canvas.height, 0, 1);
               }
 
-              if (culled) {
-                this.drawSceneIndirect(renderPass, pipeline, true);
-              } else {
-                this.drawScene(renderPass, true, true);
+              switch (this.options.renderMode) {
+                case RenderModes.naive:
+                case RenderModes.instanced:
+                case RenderModes.culled:
+                  this.drawScene(renderPass, this.options.renderMode, pipeline, this.overheadFrameBindGroup);
+                  break;
+                case RenderModes.renderBundleNaive:
+                case RenderModes.renderBundleInstanced:
+                case RenderModes.renderBundleCulled:
+                  renderPass.executeBundles([this.getRenderBundle(this.options.renderMode, pipeline, true)]);
+                  break;
               }
             }
           }

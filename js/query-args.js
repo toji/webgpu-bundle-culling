@@ -1,13 +1,12 @@
-/*
-Provides a simple way to get values from the query string if they're present
-and use a default value if not.
-
-Example:
-For the URL http://example.com/index.html?particleCount=1000
-
-QueryArgs.getInt("particleCount", 100); // URL overrides, returns 1000
-QueryArgs.getInt("particleSize", 10); // Not in URL, returns default of 10
-*/
+/**
+ * Provides a simple way to get values from the query string if they're present
+ * and use a default value if not.
+ *
+ * @example
+ * // For the URL http://example.com/index.html?particleCount=1000
+ * QueryArgs.getInt("particleCount", 100); // URL overrides, returns 1000
+ * QueryArgs.getInt("particleSize", 10); // Not in URL, returns default of 10
+ */
 
 let searchParams = null;
 function clearArgsCache() {

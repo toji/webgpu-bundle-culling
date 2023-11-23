@@ -1,5 +1,9 @@
+/** Number of timing samples to collect before computing the average */
 const AVG_SAMPLE_COUNT = 30;
 
+/**
+ * A utility that makes it a bit easier to gather timings from WebGPU compute and render passes.
+ */
 export class TimestampHelper {
   device;
   #timestampsSupported = false;
@@ -29,7 +33,7 @@ export class TimestampHelper {
           type: 'timestamp',
           count: this.#maxPassCount,
       });
-  
+
       this.#timestampResolveBuffer = this.device.createBuffer({
           size: BigUint64Array.BYTES_PER_ELEMENT * this.#maxPassCount,
           usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
