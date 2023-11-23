@@ -160,7 +160,7 @@
 
         options = {
           animateScene: false,
-          showOverhead: true, 
+          showOverhead: true,
           renderMode: RenderModes.renderBundleCulled,
         };
 
@@ -524,10 +524,10 @@
         }
 
         updateOverheadView() {
-          if (!this.device) { return; } 
+          if (!this.device) { return; }
 
           const frameArrayBuffer = this.frameArrayBuffer;
-          
+
           const viewMat = new Float32Array(frameArrayBuffer, 16 * Float32Array.BYTES_PER_ELEMENT, 16);
           mat4.identity(viewMat);
           mat4.translate(viewMat, viewMat, [0, 0, -200]);
@@ -607,7 +607,7 @@
             } else {
               this.drawScene(encoder, this.options.renderMode == RenderModes.renderBundleInstanced);
             }
-            
+
             this.renderBundle = encoder.finish();
           }
           return this.renderBundle;
@@ -646,9 +646,29 @@
             this.cullInstances(commandEncoder);
           }
 
-          const renderPassDesc = this.defaultRenderPassDescriptor;
-          renderPassDesc.timestampWrites = this.timestampHelper.timestampWrites('render');
-          const renderPass = commandEncoder.beginRenderPass(renderPassDesc);
+          // FIXME: This shouldn't have to be a separate render pass, but separating the passes avoids a bug in Chrome
+          // on Windows. The bug has been resolved in Chrome 121, so it can be removed eventually.
+          // See https://crbug.com/1478906
+          const needsPassSplit = this.options.showOverhead && culled && navigator.platform === 'Win32';
+
+          const renderPassDesc = {
+            colorAttachments: [{
+              view: this.colorAttachment.view,
+              resolveTarget: needsPassSplit ? undefined : this.context.getCurrentTexture().createView(),
+              clearValue: this.clearColor,
+              loadOp: 'clear',
+              storeOp: needsPassSplit ? 'store' : 'discard',
+            }],
+            depthStencilAttachment: {
+              view: this.depthTexture.createView(),
+              depthClearValue: 1.0,
+              depthLoadOp: 'clear',
+              depthStoreOp: needsPassSplit ? 'store' : 'discard',
+            },
+            timestampWrites: this.timestampHelper.timestampWrites('render')
+          };
+
+          let renderPass = commandEncoder.beginRenderPass(renderPassDesc);
 
           if (this.options.showOverhead) {
             if (this.canvas.height > this.canvas.width) {
@@ -680,6 +700,22 @@
             }
 
             if (this.options.showOverhead) {
+              if (needsPassSplit) {
+                renderPass.end();
+
+                renderPassDesc.colorAttachments[0] = {
+                  view: this.colorAttachment.view,
+                  resolveTarget: this.context.getCurrentTexture().createView(),
+                  loadOp: 'load',
+                  storeOp: 'discard',
+                };
+                renderPassDesc.depthStencilAttachment.depthLoadOp = 'load';
+                renderPassDesc.depthStencilAttachment.depthStoreOp = 'discard';
+                renderPassDesc.timestampWrites = this.timestampHelper.timestampWrites('overhead-render');
+
+                renderPass = commandEncoder.beginRenderPass(renderPassDesc);
+              }
+
               if (this.canvas.height > this.canvas.width) {
                 renderPass.setViewport(0, this.canvas.height * 0.5, this.canvas.width, this.canvas.height * 0.5, 0, 1);
               } else {
