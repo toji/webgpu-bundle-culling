@@ -88,6 +88,7 @@ export class TinyWebGpuDemo {
   zFar = 128;
   #canvasResolution = { width: 1, height: 1 };
   #resolutionScale = 1;
+  #deviceIsLost = false;
 
   constructor() {
     this.canvas = document.querySelector('.webgpu-canvas');
@@ -113,6 +114,10 @@ export class TinyWebGpuDemo {
     let lastFrameTime;
 
     const frameCallback = (t) => {
+      if (this.#deviceIsLost) {
+        return; // Stop processing frames if the device is lost.
+      }
+
       requestAnimationFrame(frameCallback);
 
       const frameStart = performance.now();
@@ -295,6 +300,11 @@ export class TinyWebGpuDemo {
     this.device = await adapter.requestDevice({
       requiredFeatures,
     });
+
+    this.device.lost.then((err) => {
+      this.setError(err, `WebGPU device lost. (Reason: ${err.reason})`);
+    });
+
     this.context.configure({
       device: this.device,
       format: this.colorFormat,
