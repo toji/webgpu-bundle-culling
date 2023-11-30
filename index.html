@@ -162,7 +162,7 @@
 
         options = {
           animateScene: false,
-          showOverhead: true,
+          showOverhead: QueryArgs.getBool("showOverhead", true),
           renderMode: RenderModes.renderBundleCulled,
           drawableVariants: 0,
           instancesPerDrawable: MAX_INSTANCES_PER_DRAWABLE,
@@ -255,7 +255,8 @@
           this.geometries.push(new CylinderGeometry(device));
           this.geometries.push(new ConeGeometry(device));
 
-          this.options.drawableVariants = this.geometries.length * this.materials.length;
+          const maxDrawableVariants = this.geometries.length * this.materials.length;
+          this.options.drawableVariants = Math.min(QueryArgs.getInt("drawableVariants", maxDrawableVariants), maxDrawableVariants);
           this.totalInstances = this.options.instancesPerDrawable * this.options.drawableVariants;
 
           const module = device.createShaderModule({
@@ -489,7 +490,7 @@
             });
           perfPane.addBinding(this.options, 'drawableVariants', {
             min: 1,
-            max: this.options.drawableVariants,
+            max: maxDrawableVariants,
             step: 1 }).on('change', updateInstanceCount);
           perfPane.addBinding(this.options, 'instancesPerDrawable', {
             min: 10,
