@@ -158,13 +158,13 @@
 
         zFar = 512;
 
-        drawableVariants;
         totalInstances = 0;
 
         options = {
           animateScene: false,
           showOverhead: true,
           renderMode: RenderModes.renderBundleCulled,
+          drawableVariants: 0,
           instancesPerDrawable: MAX_INSTANCES_PER_DRAWABLE,
         };
 
@@ -255,8 +255,8 @@
           this.geometries.push(new CylinderGeometry(device));
           this.geometries.push(new ConeGeometry(device));
 
-          this.drawableVariants = this.geometries.length * this.materials.length;
-          this.totalInstances = this.options.instancesPerDrawable * this.drawableVariants;
+          this.options.drawableVariants = this.geometries.length * this.materials.length;
+          this.totalInstances = this.options.instancesPerDrawable * this.options.drawableVariants;
 
           const module = device.createShaderModule({
             label: 'Geometry',
@@ -473,6 +473,12 @@
 
           this.updateInstanceBuffer(performance.now());
 
+          const updateInstanceCount = () => {
+            // Clear the render bundle cache any time the instance count changes.
+            this.renderBundles.clear();
+            this.totalInstances = this.options.instancesPerDrawable * this.options.drawableVariants;
+          }
+
           const perfPane = this.pane.addFolder({
             title: 'Performance Scaling',
             expanded: false,
@@ -481,14 +487,14 @@
             .on('change', (ev) => {
               this.updateProjection(this.canvas.width, this.canvas.height);
             });
+          perfPane.addBinding(this.options, 'drawableVariants', {
+            min: 1,
+            max: this.options.drawableVariants,
+            step: 1 }).on('change', updateInstanceCount);
           perfPane.addBinding(this.options, 'instancesPerDrawable', {
             min: 10,
             max: MAX_INSTANCES_PER_DRAWABLE,
-            step: 10 }).on('change', (ev) => {
-              // Clear the render bundle cache any time the instance count changes.
-              this.renderBundles.clear();
-              this.totalInstances = this.options.instancesPerDrawable * this.drawableVariants;
-            });
+            step: 10 }).on('change', updateInstanceCount);
           perfPane.addBinding(this, 'totalInstances', { readonly: true });
 
           this.pane.addBinding(this.options, 'renderMode', { options: RenderModes });
@@ -599,7 +605,11 @@
           renderEncoder.setBindGroup(0, frameBindGroup);
           renderEncoder.setPipeline(pipeline);
 
+          let drawableCount = 0;
           for (const drawable of this.drawables) {
+            if (drawableCount >= this.options.drawableVariants) { break; }
+            drawableCount++;
+
             renderEncoder.setBindGroup(1, drawable.material);
             renderEncoder.setBindGroup(2, drawable.instanceBindGroup);
             drawable.geometry.setBuffers(renderEncoder);
