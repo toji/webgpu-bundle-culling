@@ -163,6 +163,7 @@
         options = {
           animateScene: false,
           showOverhead: QueryArgs.getBool("showOverhead", true),
+          showPerspective: QueryArgs.getBool("showPerspective", true),
           renderMode: RenderModes.renderBundleCulled,
           drawableVariants: 0,
           instancesPerDrawable: MAX_INSTANCES_PER_DRAWABLE,
@@ -535,7 +536,7 @@
         }
 
         updateProjection(width, height) {
-          if (this.options.showOverhead) {
+          if (this.options.showOverhead && this.options.showPerspective) {
             if (this.canvas.height > this.canvas.width) {
               super.updateProjection(width, height * 0.5);
             } else {
@@ -678,7 +679,7 @@
           // FIXME: This shouldn't have to be a separate render pass, but separating the passes avoids a bug in Chrome
           // on Windows. The bug has been resolved in Chrome 121, so it can be removed eventually.
           // See https://crbug.com/1478906
-          const needsPassSplit = this.options.showOverhead && culled && navigator.platform === 'Win32';
+          const needsPassSplit = this.options.showOverhead && this.options.showPerspective && culled && navigator.platform === 'Win32';
 
           const renderPassDesc = {
             colorAttachments: [{
@@ -699,7 +700,7 @@
 
           let renderPass = commandEncoder.beginRenderPass(renderPassDesc);
 
-          if (this.options.showOverhead) {
+          if (this.options.showOverhead && this.options.showPerspective) {
             if (this.canvas.height > this.canvas.width) {
               renderPass.setViewport(0, 0, this.canvas.width, this.canvas.height * 0.5, 0, 1);
             } else {
@@ -709,17 +710,19 @@
 
           const pipeline = culled ? this.culledPipeline : this.pipeline;
           if (pipeline) {
-            switch (this.options.renderMode) {
-              case RenderModes.naive:
-              case RenderModes.instanced:
-              case RenderModes.culled:
-                this.drawScene(renderPass, this.options.renderMode, pipeline, this.frameBindGroup);
-                break;
-              case RenderModes.renderBundleNaive:
-              case RenderModes.renderBundleInstanced:
-              case RenderModes.renderBundleCulled:
-                renderPass.executeBundles([this.getRenderBundle(this.options.renderMode, pipeline)]);
-                break;
+            if (this.options.showPerspective) {
+              switch (this.options.renderMode) {
+                case RenderModes.naive:
+                case RenderModes.instanced:
+                case RenderModes.culled:
+                  this.drawScene(renderPass, this.options.renderMode, pipeline, this.frameBindGroup);
+                  break;
+                case RenderModes.renderBundleNaive:
+                case RenderModes.renderBundleInstanced:
+                case RenderModes.renderBundleCulled:
+                  renderPass.executeBundles([this.getRenderBundle(this.options.renderMode, pipeline)]);
+                  break;
+              }
             }
 
             if (this.options.showOverhead) {
@@ -739,10 +742,12 @@
                 renderPass = commandEncoder.beginRenderPass(renderPassDesc);
               }
 
-              if (this.canvas.height > this.canvas.width) {
-                renderPass.setViewport(0, this.canvas.height * 0.5, this.canvas.width, this.canvas.height * 0.5, 0, 1);
-              } else {
-                renderPass.setViewport(this.canvas.width * 0.5, 0, this.canvas.width * 0.5, this.canvas.height, 0, 1);
+              if (this.options.showPerspective) {
+                if (this.canvas.height > this.canvas.width) {
+                  renderPass.setViewport(0, this.canvas.height * 0.5, this.canvas.width, this.canvas.height * 0.5, 0, 1);
+                } else {
+                  renderPass.setViewport(this.canvas.width * 0.5, 0, this.canvas.width * 0.5, this.canvas.height, 0, 1);
+                }
               }
 
               switch (this.options.renderMode) {
