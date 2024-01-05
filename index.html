@@ -585,10 +585,14 @@
         }
 
         cullInstances(commandEncoder) {
+          commandEncoder.pushDebugGroup('Reset indirect instance counts');
           // Clear the instance count of the indirect buffer for each drawable
           for (const drawable of this.drawables) {
             commandEncoder.clearBuffer(drawable.indirectBuffer, 4, 4);
           }
+          commandEncoder.popDebugGroup();
+
+          commandEncoder.pushDebugGroup('Frustum Culling Pass');
 
           // Run a compute shader to find all the visible geometry for each drawable
           const computePass = commandEncoder.beginComputePass({
@@ -601,9 +605,13 @@
             computePass.dispatchWorkgroups(Math.ceil(this.options.instancesPerDrawable / CULLING_WORKGROUP_SIZE));
           }
           computePass.end();
+
+          commandEncoder.popDebugGroup();
         }
 
         drawScene(renderEncoder, mode, pipeline, frameBindGroup) {
+          renderEncoder.pushDebugGroup(`Draw Scene ${this.options.renderMode % 3 == RenderModes.culled ? '(Indirect)' : '(Direct)'}`);
+
           renderEncoder.setBindGroup(0, frameBindGroup);
           renderEncoder.setPipeline(pipeline);
 
@@ -636,6 +644,8 @@
                 break;
             }
           }
+
+          renderEncoder.popDebugGroup();
         }
 
         getRenderBundle(mode, pipeline, overhead = false) {
@@ -698,6 +708,7 @@
             timestampWrites: this.timestampHelper.timestampWrites('render')
           };
 
+          commandEncoder.pushDebugGroup('Outside Render Pass');
           let renderPass = commandEncoder.beginRenderPass(renderPassDesc);
 
           if (this.options.showOverhead && this.options.showPerspective) {
@@ -710,6 +721,8 @@
 
           const pipeline = culled ? this.culledPipeline : this.pipeline;
           if (pipeline) {
+            renderPass.pushDebugGroup('Inside Render Pass');
+
             if (this.options.showPerspective) {
               switch (this.options.renderMode) {
                 case RenderModes.naive:
@@ -720,10 +733,14 @@
                 case RenderModes.renderBundleNaive:
                 case RenderModes.renderBundleInstanced:
                 case RenderModes.renderBundleCulled:
+                  renderPass.pushDebugGroup('Executing Bundles');
                   renderPass.executeBundles([this.getRenderBundle(this.options.renderMode, pipeline)]);
+                  renderPass.popDebugGroup();
                   break;
               }
             }
+
+            renderPass.popDebugGroup();
 
             if (this.options.showOverhead) {
               if (needsPassSplit) {
@@ -766,6 +783,8 @@
           }
 
           renderPass.end();
+
+          commandEncoder.popDebugGroup();
 
           this.timestampHelper.resolve(commandEncoder);
 
