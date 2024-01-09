@@ -26,6 +26,8 @@
       const MAX_INSTANCES_PER_DRAWABLE = QueryArgs.getInt("instancesPerDrawable", navigator.userAgentData?.mobile ? 500 : 1000);
       const INSTANCE_ELEMENT_LENGTH = 16;
 
+      const SPLIT_INDIRECT_ARGS_BUFFER = QueryArgs.getBool("splitIndirectArgsBuffer", true);
+
       const GEOMETRY_SHADER = (geometry, culled = false) => {
         const layout = geometry.layout;
 
@@ -52,13 +54,18 @@
           @group(1) @binding(0) var<uniform> material: Material;
 
           @group(2) @binding(0) var<storage, read> instances: array<mat4x4f>;
-          @group(2) @binding(1) var<storage, read> culledInstances: array<u32>;
+
+          struct CulledInstances {
+            indirectIndex: u32,
+            instances: array<u32>,
+          }
+          @group(2) @binding(1) var<storage, read> culled: CulledInstances;
 
           @vertex
           fn vertexMain(in: VertexIn) -> VertexOut {
             var out: VertexOut;
           #if ${culled}
-            let instanceIndex = culledInstances[in.instanceIndex];
+            let instanceIndex = culled.instances[in.instanceIndex];
           #else
             let instanceIndex = in.instanceIndex;
           #endif
@@ -100,13 +107,21 @@
         @group(0) @binding(0) var<uniform> camera: CameraUniforms;
 
         @group(1) @binding(0) var<storage, read> instances: array<mat4x4f>;
-        @group(1) @binding(1) var<storage, read_write> culledInstances: array<u32>;
+
+        struct CulledInstances {
+          indirectIndex: u32,
+          instances: array<u32>,
+        }
+        @group(1) @binding(1) var<storage, read_write> culled: CulledInstances;
 
         struct IndirectArgs {
           drawCount: u32,
           instanceCount: atomic<u32>,
+          reserved0: u32,
+          reserved1: u32,
+          reserved2: u32,
         }
-        @group(1) @binding(2) var<storage, read_write> indirect: IndirectArgs;
+        @group(1) @binding(2) var<storage, read_write> indirectArgs: array<IndirectArgs>;
 
         fn isVisible(instanceIndex: u32) -> bool {
           let model = instances[instanceIndex];
@@ -130,8 +145,8 @@
 
           if (!isVisible(instanceIndex)) { return; }
 
-          let culledIndex = atomicAdd(&indirect.instanceCount, 1u);
-          culledInstances[culledIndex] = instanceIndex;
+          let culledIndex = atomicAdd(&indirectArgs[culled.indirectIndex].instanceCount, 1u);
+          culled.instances[culledIndex] = instanceIndex;
         }
       `;
 
@@ -398,6 +413,20 @@
 
           this.instanceArray = new Float32Array(MAX_INSTANCES_PER_DRAWABLE * INSTANCE_ELEMENT_LENGTH);
 
+          let indirectBuffer;
+          let indirectBufferOffset = 0;
+          let indirectArgs;
+
+          if (!SPLIT_INDIRECT_ARGS_BUFFER) {
+            indirectBuffer = this.device.createBuffer({
+              label: 'Instance indirect',
+              size: 20 * this.materials.length * this.geometries.length,
+              usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+              mappedAtCreation: true,
+            });
+            indirectArgs = new Uint32Array(indirectBuffer.getMappedRange());
+          }
+
           for (const material of this.materials) {
             for (const geometry of this.geometries) {
               let instances = [];
@@ -416,22 +445,34 @@
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
               });
 
+              const indirectOffset = indirectBufferOffset;
+              if (SPLIT_INDIRECT_ARGS_BUFFER) {
+                indirectBuffer = this.device.createBuffer({
+                  label: 'Instance indirect',
+                  size: 20,
+                  usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                  mappedAtCreation: true,
+                });
+                const indirectArgs = new Uint32Array(indirectBuffer.getMappedRange());
+                indirectArgs[0] = geometry.drawCount;
+                indirectArgs[1] = MAX_INSTANCES_PER_DRAWABLE;
+                indirectBuffer.unmap();
+              } else {
+                const index = (indirectOffset / 20) * 5;
+                indirectArgs[index] = geometry.drawCount;
+                indirectArgs[index+1] = MAX_INSTANCES_PER_DRAWABLE;
+                indirectBufferOffset += 20;
+              }
+
               const culledInstanceBuffer = this.device.createBuffer({
                 label: 'Culled Instance',
-                size: MAX_INSTANCES_PER_DRAWABLE * Uint32Array.BYTES_PER_ELEMENT,
-                usage: GPUBufferUsage.STORAGE
-              });
-
-              const indirectBuffer = this.device.createBuffer({
-                label: 'Instance indirect',
-                size: 20,
-                usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                size: (MAX_INSTANCES_PER_DRAWABLE * Uint32Array.BYTES_PER_ELEMENT) + 4,
+                usage: GPUBufferUsage.STORAGE,
                 mappedAtCreation: true,
               });
-              const indirectArgs = new Uint32Array(indirectBuffer.getMappedRange());
-              indirectArgs[0] = geometry.drawCount;
-              indirectArgs[1] = MAX_INSTANCES_PER_DRAWABLE;
-              indirectBuffer.unmap();
+              const culledInstanceArray = new Uint32Array(culledInstanceBuffer.getMappedRange(0, 4));
+              culledInstanceArray[0] = indirectOffset / 20;
+              culledInstanceBuffer.unmap();
 
               const instanceBindGroup = this.device.createBindGroup({
                 label: 'Instance',
@@ -467,10 +508,15 @@
                 instanceCount: MAX_INSTANCES_PER_DRAWABLE,
                 instanceBuffer,
                 indirectBuffer,
+                indirectOffset,
                 instanceBindGroup,
                 culledInstanceBindGroup,
               });
             }
+          }
+
+          if (!SPLIT_INDIRECT_ARGS_BUFFER) {
+            indirectBuffer.unmap();
           }
 
           this.updateInstanceBuffer(performance.now());
@@ -588,7 +634,7 @@
           commandEncoder.pushDebugGroup('Reset indirect instance counts');
           // Clear the instance count of the indirect buffer for each drawable
           for (const drawable of this.drawables) {
-            commandEncoder.clearBuffer(drawable.indirectBuffer, 4, 4);
+            commandEncoder.clearBuffer(drawable.indirectBuffer, drawable.indirectOffset + 4, 4);
           }
           commandEncoder.popDebugGroup();
 
@@ -637,9 +683,9 @@
 
               case RenderModes.culled:
                 if(drawable.geometry.indexBinding) {
-                  renderEncoder.drawIndexedIndirect(drawable.indirectBuffer, 0);
+                  renderEncoder.drawIndexedIndirect(drawable.indirectBuffer, drawable.indirectOffset);
                 } else {
-                  renderEncoder.drawIndirect(drawable.indirectBuffer, 0);
+                  renderEncoder.drawIndirect(drawable.indirectBuffer, drawable.indirectOffset);
                 }
                 break;
             }
