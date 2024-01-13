@@ -16,9 +16,9 @@
       import { wgsl } from 'https://cdn.jsdelivr.net/npm/wgsl-preprocessor@1.0/wgsl-preprocessor.js';
       import { QueryArgs } from './js/query-args.js';
       import { TinyWebGpuDemo } from './js/tiny-webgpu-demo.js'
-      import { AttribLocation } from './js/geometry.js'
+      import { AttribLocation, Geometry } from './js/geometry.js'
       import { TimestampHelper } from './js/timestamp-helper.js'
-      import { BoxGeometry, SphereGeometry, CylinderGeometry, ConeGeometry } from './js/shapes.js'
+      import { BoxGeometryDesc, SphereGeometryDesc, CylinderGeometryDesc, ConeGeometryDesc } from './js/shapes.js'
 
       const tempMat = mat4.create();
       const tempQuat = quat.create();
@@ -266,10 +266,12 @@
           this.materials.push(this.createMaterialBindGroup(0, 0.5, 0.5));
 
           // Four different geometry types
-          this.geometries.push(new BoxGeometry(device));
-          this.geometries.push(new SphereGeometry(device));
-          this.geometries.push(new CylinderGeometry(device));
-          this.geometries.push(new ConeGeometry(device));
+          this.geometries = Geometry.CreateBatch(device, [
+            new BoxGeometryDesc(),
+            new SphereGeometryDesc(),
+            new CylinderGeometryDesc(),
+            new ConeGeometryDesc(),
+          ]);
 
           const maxDrawableVariants = this.geometries.length * this.materials.length;
           this.options.drawableVariants = Math.min(QueryArgs.getInt("drawableVariants", maxDrawableVariants), maxDrawableVariants);
@@ -456,11 +458,17 @@
                 const indirectArgs = new Uint32Array(indirectBuffer.getMappedRange());
                 indirectArgs[0] = geometry.drawCount;
                 indirectArgs[1] = MAX_INSTANCES_PER_DRAWABLE;
+                if (geometry.indexBinding) {
+                  indirectArgs[2] = geometry.indexBinding.firstIndex;
+                }
                 indirectBuffer.unmap();
               } else {
                 const index = (indirectOffset / 20) * 5;
                 indirectArgs[index] = geometry.drawCount;
                 indirectArgs[index+1] = MAX_INSTANCES_PER_DRAWABLE;
+                if (geometry.indexBinding) {
+                  indirectArgs[index+2] = geometry.indexBinding.firstIndex;
+                }
                 indirectBufferOffset += 20;
               }
 

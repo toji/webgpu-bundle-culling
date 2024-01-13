@@ -93,73 +93,131 @@ const DefaultStride = {
  * @prop {GPUPrimitiveTopology} [topology]
  */
 
-function buildGeometry(device, desc) {
-  let vertexBufferLayouts = [];
-  let maxVertices = Number.MAX_SAFE_INTEGER;
-
+function buildGeometryBatch(device, descArray) {
   let arraySource = new Map();
-  let requiredBufferSize = 0;
-  for (const attribName of Object.keys(AttribLocation)) {
-    const attrib = desc[attribName];
-    if (attrib === undefined) { continue; }
+  let requiredVertexBufferSize = 0;
+  let requiredIndexBufferSize = 0;
 
-    const values = attrib.values ?? attrib;
+  const geometries = [];
 
-    const format = attrib?.format ?? DefaultAttribFormat[attribName];
-    const arrayStride = attrib?.stride ?? DefaultStride[format];
-    const offset = attrib.offset ?? 0;
-    const shaderLocation = AttribLocation[attribName];
+  for (const desc of descArray) {
+    let vertexBufferLayouts = [];
+    let maxVertices = Number.MAX_SAFE_INTEGER;
 
-    // Figure out how much space each attribute will require. Does
-    // some basic de-duping of attrib values to prevent the same array from
-    // being uploaded twice.
-    let source = arraySource.get(values);
-    if (!source) {
-      let byteArray;
-      if (ArrayBuffer.isView(values)) {
-        byteArray = new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
-      } else if (values instanceof ArrayBuffer) {
-        byteArray = new Uint8Array(values);
-      } else if (Array.isArray(values)) {
-        // TODO: Should this be based on the attrib type?
-        byteArray = new Uint8Array(new Float32Array(values).buffer);
-      } else {
-        throw new Error(`Unknown values type in attribute ${attribName}`);
+    for (const attribName of Object.keys(AttribLocation)) {
+      const attrib = desc[attribName];
+      if (attrib === undefined) { continue; }
+
+      const values = attrib.values ?? attrib;
+
+      const format = attrib?.format ?? DefaultAttribFormat[attribName];
+      const arrayStride = attrib?.stride ?? DefaultStride[format];
+      const offset = attrib.offset ?? 0;
+      const shaderLocation = AttribLocation[attribName];
+
+      // Figure out how much space each attribute will require. Does
+      // some basic de-duping of attrib values to prevent the same array from
+      // being uploaded twice.
+      let source = arraySource.get(values);
+      if (!source) {
+        let byteArray;
+        if (ArrayBuffer.isView(values)) {
+          byteArray = new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
+        } else if (values instanceof ArrayBuffer) {
+          byteArray = new Uint8Array(values);
+        } else if (Array.isArray(values)) {
+          // TODO: Should this be based on the attrib type?
+          byteArray = new Uint8Array(new Float32Array(values).buffer);
+        } else {
+          throw new Error(`Unknown values type in attribute ${attribName}`);
+        }
+
+        source = {
+          byteArray,
+          bufferOffset: requiredVertexBufferSize,
+          size: byteArray.byteLength,
+        };
+        arraySource.set(values, source);
+
+        requiredVertexBufferSize += Math.ceil(byteArray.byteLength / 4) * 4;
+        maxVertices = Math.min(maxVertices, byteArray.byteLength / arrayStride);
       }
 
-      source = {
-        byteArray,
-        bufferOffset: requiredBufferSize,
-        size: byteArray.byteLength,
-      };
-      arraySource.set(values, source);
-
-      requiredBufferSize += Math.ceil(byteArray.byteLength / 4) * 4;
-      maxVertices = Math.min(maxVertices, byteArray.byteLength / arrayStride);
+      vertexBufferLayouts.push({
+        buffer: values,
+        arrayStride,
+        attributes: [{
+          shaderLocation,
+          format,
+          offset: offset + source.bufferOffset,
+        }]
+      });
     }
 
-    vertexBufferLayouts.push({
-      buffer: values,
-      arrayStride,
-      attributes: [{
-        shaderLocation,
-        format,
-        offset: offset + source.bufferOffset,
-      }]
+    // Create and fill the index buffer
+    let indexBinding;
+    let indexArray = null;
+    let indexFormat;
+
+    if (desc.indices) {
+      if (Array.isArray(desc.indices)) {
+        const u32Array = new Uint32Array(desc.indices);
+        indexArray = new Uint8Array(u32Array.buffer, 0, u32Array.byteLength);
+        indexFormat = 'uint32';
+      } else {
+        indexFormat = desc.indices instanceof Uint16Array ? 'uint16' : 'uint32';
+        indexArray = new Uint8Array(desc.indices.buffer, desc.indices.byteOffset, desc.indices.byteLength);
+      }
+
+      indexBinding = {
+        format: indexFormat,
+        buffer: indexArray,
+        offset: requiredIndexBufferSize,
+        size: indexArray.byteLength,
+        firstIndex: 0,
+      };
+
+      requiredIndexBufferSize += indexArray.byteLength;
+    }
+
+    const bufferLayouts = NormalizeBufferLayout([...vertexBufferLayouts.values()]);
+    const layout = layoutCache.createLayout(bufferLayouts, desc.topology ?? 'triangle-list', indexFormat);
+
+    const vertexBindings = [];
+    for (const layout of bufferLayouts) {
+      vertexBindings.push({
+        buffer: null, // Will be populated after
+        offset: layout.bufferOffset,
+        size: arraySource.get(layout.buffer).size,
+      });
+    }
+
+    let drawCount = desc.drawCount;
+    if (drawCount === undefined) {
+      if (indexArray) {
+        drawCount = desc.indices.length;
+      } else {
+        drawCount = maxVertices;
+      }
+    }
+
+    geometries.push({
+      layout,
+      vertexBindings,
+      indexBinding,
+      drawCount,
     });
   }
 
-  if (requiredBufferSize == 0) {
+  if (requiredVertexBufferSize == 0) {
     throw new Error('No vertex data provided');
   }
-
-  const bufferLayouts = NormalizeBufferLayout([...vertexBufferLayouts.values()]);
 
   // Allocate a GPUBuffer of the required size and copy all the array values
   // into it.
   const vertexBuffer = device.createBuffer({
-    label: `${desc.label ?? ''}_VertexBuffer`,
-    size: requiredBufferSize,
+    label: `BatchVertexBuffer`,
+    size: requiredVertexBufferSize,
     usage: GPUBufferUsage.VERTEX,
     mappedAtCreation: true,
   });
@@ -169,88 +227,69 @@ function buildGeometry(device, desc) {
   }
   vertexBuffer.unmap();
 
-  const vertexBindings = [];
-  for (const layout of bufferLayouts) {
-    vertexBindings.push({
-      buffer: vertexBuffer,
-      offset: layout.bufferOffset,
-      size: arraySource.get(layout.buffer).size,
-    });
-  }
-
-  // Create and fill the index buffer
-  let indexArray = null;
-  if (desc.indices) {
-    if (Array.isArray(desc.indices)) {
-      indexArray = new Uint32Array(desc.indices);
-    } else {
-      indexArray = desc.indices;
+  for (const geometry of geometries) {
+    for (const binding of geometry.vertexBindings) {
+      binding.buffer = vertexBuffer;
     }
   }
 
-  const indexFormat = indexArray instanceof Uint16Array ? 'uint16' : 'uint32';
-  const layout = layoutCache.createLayout(bufferLayouts, desc.topology ?? 'triangle-list', indexFormat);
-
-  let indexBinding;
-  if (indexArray) {
+  if (requiredIndexBufferSize > 0) {
     const indexBuffer = device.createBuffer({
-      label: `${desc.label ?? ''}_IndexBuffer`,
-      size: indexArray.byteLength,
+      label: `BatchIndexBuffer`,
+      size: requiredIndexBufferSize,
       usage: GPUBufferUsage.INDEX,
       mappedAtCreation: true,
     });
-    const indexBufferArray = new indexArray.constructor(indexBuffer.getMappedRange());
-    indexBufferArray.set(indexArray);
+    const indexBufferArray = new Uint8Array(indexBuffer.getMappedRange());
+
+    for (const geometry of geometries) {
+      if (geometry.indexBinding) {
+        indexBufferArray.set(geometry.indexBinding.buffer, geometry.indexBinding.offset);
+        geometry.indexBinding.buffer = indexBuffer;
+
+        // In order to make indirect drawing validation faster in Chrome, reset the binding offset and size to 0 while
+        // setting the firstIndex to the approrpriate offset.
+        geometry.indexBinding.firstIndex = geometry.indexBinding.format == 'uint16' ? geometry.indexBinding.offset / 2 : geometry.indexBinding.offset / 4;
+        geometry.indexBinding.offset = 0;
+        geometry.indexBinding.size = undefined;
+      }
+    }
+
     indexBuffer.unmap();
-
-    indexBinding = {
-      format: indexFormat,
-      buffer: indexBuffer,
-      offset: 0,
-      size: indexArray.byteLength,
-    }
   }
 
-  let drawCount = desc.drawCount;
-  if (drawCount === undefined) {
-    if (indexArray) {
-      drawCount = indexArray.length;
-    } else {
-      drawCount = maxVertices;
-    }
-  }
-
-  return {
-    layout,
-    vertexBindings,
-    indexBinding,
-    drawCount,
-  }
-
-  // TODO: Return
+  return geometries;
 }
 
 export class Geometry {
-
   /**
-   * 
-   * @param {GPUDevice} device 
-   * @param {GeometryDescriptor} desc 
+   *
+   * @param {GPUDevice} device
+   * @param {GeometryDescriptor} desc
    */
-  constructor(device, desc) {
+  constructor(device, geomOrDesc) {
     this.device = device;
-    this.label = desc.label;
 
-    const geom = buildGeometry(device, desc);
+    let geom;
+    if (geomOrDesc.vertexBindings) {
+      geom = geomOrDesc;
+    } else {
+      geom = buildGeometryBatch(device, [geomOrDesc])[0];
+    }
+
     this.layout = geom.layout;
     this.vertexBindings = geom.vertexBindings;
     this.indexBinding = geom.indexBinding;
     this.drawCount = geom.drawCount;
   }
 
+  static CreateBatch(device, descArray) {
+    return buildGeometryBatch(device, descArray).map((g) => new Geometry(device, g));
+  }
+
   /**
    * Sets the Vertex and Index buffers for this geometry
-   * @param {GPURenderPassEncoder} renderPass 
+   * @param {GPURenderPassEncoder} renderPass
    */
   setBuffers(renderPass) {
     for (let i = 0; i < this.vertexBindings.length; ++i) {
@@ -266,7 +305,7 @@ export class Geometry {
 
   draw(renderPass, instanceCount, firstInstance) {
     if (this.indexBinding) {
-      renderPass.drawIndexed(this.drawCount, instanceCount, 0, 0, firstInstance);
+      renderPass.drawIndexed(this.drawCount, instanceCount, this.indexBinding.firstIndex, 0, firstInstance);
     } else {
       renderPass.draw(this.drawCount, instanceCount, 0, firstInstance);
     }

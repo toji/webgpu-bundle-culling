@@ -1,8 +1,8 @@
 import { Geometry } from "./geometry.js";
 import { vec3 } from 'https://cdn.jsdelivr.net/npm/gl-matrix@3.4.3/esm/index.js';
 
-export class BoxGeometry extends Geometry {
-  constructor(device, options = {}) {
+export class BoxGeometryDesc {
+  constructor(options = {}) {
     const w = (options.width ?? 1) * 0.5;
     const h = (options.height ?? 1) * 0.5;
     const d = (options.depth ?? 1) * 0.5;
@@ -56,17 +56,15 @@ export class BoxGeometry extends Geometry {
       x-w, y+h, z-d,  0, 0, -1,  0, 0,
     ]);
 
-   super(device, {
-      label: options.label,
-      position: { values: boxVertArray, stride: 32 },
-      normal: { values: boxVertArray, stride: 32, offset: 12 },
-      texcoord0: { values: boxVertArray, stride: 32, offset: 24 }
-    });
+    this.label = options.label;
+    this.position = { values: boxVertArray, stride: 32 };
+    this.normal = { values: boxVertArray, stride: 32, offset: 12 };
+    this.texcoord0 = { values: boxVertArray, stride: 32, offset: 24 };
   }
 }
 
 // Big swaths of this code lifted with love from Three.js
-export class SphereGeometry extends Geometry {
+export class SphereGeometryDesc {
   constructor(device, options = {}) {
     const radius = options.radius ?? 0.5;
     const widthSegments = Math.max( 3, Math.floor( options.widthSegments ?? 32 ) );
@@ -147,17 +145,16 @@ export class SphereGeometry extends Geometry {
 
     const vertArray = new Float32Array(vertices);
 
-    super(device, {
-      label: options.label,
-      position: { values: vertArray, stride: 32 },
-      normal: { values: vertArray, stride: 32, offset: 12 },
-      texcoord0: { values: vertArray, stride: 32, offset: 24 },
-      indices: new Uint16Array(indices),
-    });
+
+    this.label = options.label;
+    this.position = { values: vertArray, stride: 32 };
+    this.normal = { values: vertArray, stride: 32, offset: 12 };
+    this.texcoord0 = { values: vertArray, stride: 32, offset: 24 };
+    this.indices = new Uint16Array(indices);
   }
 }
 
-export class CylinderGeometry extends Geometry {
+export class CylinderGeometryDesc {
   constructor(device, options = {}) {
     const radiusTop = options.radiusTop ?? 0.5;
     const radiusBottom = options.radiusBottom ?? 0.5;
@@ -190,13 +187,11 @@ export class CylinderGeometry extends Geometry {
 
     const vertexArray = new Float32Array(vertices);
 
-    super(device, {
-      label: options.label,
-      position: {values: vertexArray, stride: 32},
-      normal: {values: vertexArray, stride: 32, offset: 12},
-      texcoord0: {values: vertexArray, stride: 32, offset: 24},
-      indices: new Uint16Array(indices),
-    });
+    this.label = options.label;
+    this.position = {values: vertexArray, stride: 32};
+    this.normal = {values: vertexArray, stride: 32, offset: 12};
+    this.texcoord0 = {values: vertexArray, stride: 32, offset: 24};
+    this.indices = new Uint16Array(indices);
 
     // build geometry
     function generateTorso() {
@@ -334,7 +329,7 @@ export class CylinderGeometry extends Geometry {
   }
 }
 
-export class ConeGeometry extends CylinderGeometry {
+export class ConeGeometryDesc extends CylinderGeometryDesc {
   constructor(device, options = {}) {
     super(device, {
       ...options,
